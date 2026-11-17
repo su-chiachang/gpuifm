@@ -27,7 +27,7 @@ fn main() {
         nanofm::ui::menus::rebuild(cx, &nanofm::ui::menus::MenuState { undo: None, redo: None, sidebar_visible: true });
 
         let bounds = Bounds::centered(None, size(px(1000.), px(640.)), cx);
-        cx.open_window(
+        let window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -50,5 +50,13 @@ fn main() {
         )
         .unwrap();
         cx.activate(true);
+        if let Some(cfg) = nanofm::bench::BenchConfig::from_env() {
+            let handle = window;
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                handle.update(cx, |b, window, cx| { let list = b.active_list(cx); nanofm::bench::start(cfg, list, window, cx) }).ok();
+            })
+            .detach();
+        }
     });
 }
