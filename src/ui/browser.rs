@@ -317,10 +317,10 @@ impl Browser {
     // ---- pane management ---------------------------------------------------------------------
 
     fn create_pane(&mut self, id: PaneId, snap: PaneSnapshot, sort: SortOrder, window: &mut Window, cx: &mut Context<Self>) {
-        let (ops, opener, hidden) = (self.ops.clone(), self.opener.clone(), self.show_hidden);
+        let (ops, opener, hidden, home) = (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone());
         let first = snap.tabs.first().cloned().unwrap_or_else(|| self.places.home.clone());
         let pane = cx.new(|cx| {
-            let mut p = Pane::new(id, first, ops, opener, hidden, sort, snap.view_mode, cx);
+            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, cx);
             p.restore_tabs(&snap, cx);
             p
         });

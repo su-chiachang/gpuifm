@@ -1,6 +1,8 @@
 //! One pane: a tab strip, a navigation toolbar and the active tab's file list.
 
+use crate::fm_core::format::status;
 use crate::fm_core::layout::PaneId;
+use crate::fm_core::places::{crumb_title, crumbs};
 use crate::fm_core::sort::{SortKey, SortOrder};
 use crate::fm_core::state::{PaneSnapshot, ViewMode};
 use crate::fm_core::tabs::Tabs;
@@ -44,6 +46,8 @@ struct FilterBox {
 struct Tab {
     list: Entity<FileList>,
     _sub: Subscription,
+    /// Repaints the path bar (counts, selection) when the list changes.
+    _obs: Subscription,
 }
 
 pub struct Pane {
@@ -51,6 +55,7 @@ pub struct Pane {
     tabs: Tabs<Tab>,
     ops: Entity<FileOps>,
     opener: Rc<dyn Opener>,
+    home: PathBuf,
     /// Sort and view mode are per pane; every tab follows the pane's sort.
     sort: SortOrder,
     view_mode: ViewMode,
@@ -77,6 +82,7 @@ impl Pane {
         start: PathBuf,
         ops: Entity<FileOps>,
         opener: Rc<dyn Opener>,
+        home: PathBuf,
         show_hidden: bool,
         sort: SortOrder,
         view_mode: ViewMode,
@@ -89,6 +95,7 @@ impl Pane {
             tabs: Tabs::new(first),
             ops,
             opener,
+            home,
             sort,
             view_mode,
             show_hidden,
@@ -131,7 +138,8 @@ impl Pane {
             }
             FileListEvent::ColumnLeft | FileListEvent::ColumnRight => {}
         });
-        Tab { list, _sub: sub }
+        let obs = cx.observe(&list, |_, _, cx| cx.notify());
+        Tab { list, _sub: sub, _obs: obs }
     }
 
     /// Adds the remaining tabs of a saved pane (the first one was the pane's start) and
@@ -278,6 +286,64 @@ impl Pane {
         if let Some(c) = &self.columns {
             c.update(cx, |c, cx| c.reload(cx));
         }
+    }
+
+    /// Path-bar crumb titles for the active tab, outermost first.
+    pub fn crumbs(&self, cx: &App) -> Vec<String> {
+        let dir = self.active_list().read(cx).current_dir().to_path_buf();
+        crumbs(&dir, &self.home).iter().map(|p| crumb_title(p, &self.home)).collect()
+    }
+
+    /// Path-bar status text: item count, or selected-of-total.
+    pub fn status_text(&self, cx: &App) -> String {
+        let l = self.active_list().read(cx);
+        status(l.selection_count(), l.entry_count())
+    }
+
+    fn path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (dir, status_text) = {
+            let l = self.active_list().read(cx);
+            (l.current_dir().to_path_buf(), status(l.selection_count(), l.entry_count()))
+        };
+        let pane = self.id.0;
+        let trail = crumbs(&dir, &self.home);
+        let last = trail.len() - 1;
+        let mut bar = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(24.))
+            .px_2()
+            .gap_1()
+            .bg(rgb(theme::TOOLBAR_BG))
+            .border_t_1()
+            .border_color(rgb(theme::BORDER))
+            .text_xs();
+        let mut crumbs_row = div().flex().flex_1().min_w_0().items_center().gap_1().overflow_hidden();
+        for (i, p) in trail.into_iter().enumerate() {
+            if i > 0 {
+                crumbs_row = crumbs_row.child(div().flex_none().text_color(rgb(theme::TEXT_DIM)).child("\u{203A}"));
+            }
+            let title = crumb_title(&p, &self.home);
+            crumbs_row = crumbs_row.child(
+                div()
+                    .id(("crumb", i))
+                    .debug_selector(move || format!("crumb-{pane}-{i}"))
+                    .flex_none()
+                    .px_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(rgb(if i == last { theme::TEXT } else { theme::TEXT_DIM }))
+                    .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_list().update(cx, |l, cx| l.navigate(p.clone(), None, cx));
+                        cx.emit(PaneEvent::Refocus);
+                    })),
+            );
+        }
+        bar = bar.child(crumbs_row).child(div().flex_none().text_color(rgb(theme::TEXT_DIM)).child(status_text));
+        bar
     }
 
     pub fn id(&self) -> PaneId {
@@ -511,7 +577,7 @@ impl Render for Pane {
                 .text_sm()
                 .child(f.input.clone())
         });
-        let (can_back, can_fwd, can_parent, hidden, dir, list) = {
+        let (can_back, can_fwd, can_parent, hidden, list) = {
             let list = self.active_list().clone();
             let l = list.read(cx);
             (
@@ -519,7 +585,6 @@ impl Render for Pane {
                 l.can_forward(),
                 l.can_parent(),
                 l.show_hidden(),
-                l.current_dir().display().to_string(),
                 list,
             )
         };
@@ -546,18 +611,7 @@ impl Render for Pane {
                 this.active_list().update(cx, |l, cx| l.on_parent(cx));
                 cx.emit(PaneEvent::Refocus);
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_2()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_sm()
-                    .text_color(rgb(theme::TEXT))
-                    .child(dir),
-            )
+            .child(div().flex_1().min_w_0())
             .children(filter_box)
             .when(busy, |d| {
                 d.child(
@@ -597,5 +651,6 @@ impl Render for Pane {
                 Some(c) => c.into_any_element(),
                 None => list.into_any_element(),
             })
+            .child(self.path_bar(cx))
     }
 }

@@ -1463,3 +1463,85 @@ fn open_in_split_rest_as_tabs(cx: &mut TestAppContext) {
     assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf()]);
     assert_eq!(*rec.opened.borrow(), [t.path().join("f.txt")]);
 }
+
+// ---- Phase 5: path bar and status ------------------------------------------------------------
+
+fn crumb_titles(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).crumbs(cx))
+}
+
+fn status_of(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> String {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).status_text(cx))
+}
+
+#[gpui::test]
+fn crumb_click_navigates(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a").join("b")).unwrap();
+    fs::write(t.path().join("a").join("f.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a").join("b"));
+    assert_eq!(crumb_titles(&b, cx), ["Home", "a", "b"]);
+    let r = cx.debug_bounds("crumb-1-1").expect("crumb rendered");
+    cx.simulate_click(r.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("a"));
+    assert_eq!(crumb_titles(&b, cx), ["Home", "a"]);
+    assert_eq!(entry_names(&b, cx), ["b", "f.txt"]);
+    // the home crumb goes home; focus is back in the list for keyboard use
+    let r = cx.debug_bounds("crumb-1-0").expect("home crumb");
+    cx.simulate_click(r.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path());
+    keys(cx, "down");
+    assert_eq!(selected(&b, 1, cx), Some("a".into()));
+}
+
+#[gpui::test]
+fn crumbs_outside_home_start_at_root(cx: &mut TestAppContext) {
+    let home = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, home.path(), other.path());
+    let titles = crumb_titles(&b, cx);
+    assert_eq!(titles[0], "Macintosh HD");
+    assert_eq!(titles.last().map(String::as_str), other.path().file_name().and_then(|n| n.to_str()));
+}
+
+#[gpui::test]
+fn status_counts_and_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    assert_eq!(status_of(&b, cx), "3 items");
+    keys(cx, "down");
+    assert_eq!(status_of(&b, cx), "1 of 3 items selected");
+    keys(cx, "cmd-a");
+    assert_eq!(status_of(&b, cx), "3 of 3 items selected");
+}
+
+#[gpui::test]
+fn status_singular(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("x"), "x").unwrap();
+    let (b, cx) = mount(cx, t.path());
+    assert_eq!(status_of(&b, cx), "1 item");
+}
+
+#[gpui::test]
+fn corrupt_state_renamed_and_tempdir_defaults(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    fs::write(state.path().join("state.json"), "{ definitely not json").unwrap();
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    // defaults come from the rooted home (2x2 grid on its Desktop/Documents/Downloads/Home), never real folders
+    assert_eq!(cx.read(|cx| b.read(cx).favorites().len()), 4);
+    assert!(cx.read(|cx| b.read(cx).favorites().iter().all(|f| f.path.starts_with(t.path()))));
+    let files: Vec<String> =
+        fs::read_dir(state.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("state.json.corrupt-"));
+    assert_eq!(fs::read(state.path().join(&files[0])).unwrap(), b"{ definitely not json");
+}
