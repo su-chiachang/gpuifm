@@ -1,6 +1,7 @@
 //! Headless end-to-end UI tests: the real Browser, the real keymap, real keystrokes, tempdirs only.
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use nanofm::fm_core::places::Places;
 use nanofm::fm_core::layout::{Axis, LayoutTree, PaneId};
 use nanofm::fm_core::sys::TrashCleanup;
 use nanofm::fm_core::sort::SortKey;
@@ -1117,4 +1118,590 @@ fn column_rows_have_layout(cx: &mut TestAppContext) {
     keys(cx, "cmd-2");
     let r = cx.debug_bounds("row-0").expect("row-0 laid out in column mode");
     assert!(r.size.height > gpui::px(0.));
+}
+
+// ---- Phase 5: Go menu ----------------------------------------------------------------------
+
+/// Browser at `start` whose home (and Desktop, Downloads, ...) live under `home`: never real folders.
+fn mount_home<'a>(
+    cx: &'a mut TestAppContext,
+    home: &Path,
+    start: &Path,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (home, start) = (home.to_path_buf(), start.to_path_buf());
+    mount_opts(cx, move || BrowserOptions { start: Some(start), places: Places::rooted(home), ..Default::default() })
+}
+
+fn banner_of(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| b.read(cx).banner().map(str::to_string))
+}
+
+fn goto_open(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).go_to_input().is_some())
+}
+
+fn goto_text(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| b.read(cx).go_to_input().map(|i| i.read(cx).text().to_string()))
+}
+
+#[gpui::test]
+fn shift_cmd_h_goes_home(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("a")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-h");
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn alt_cmd_l_downloads(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("Downloads")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "alt-cmd-l");
+    assert_eq!(dir_of(&b, cx), t.path().join("Downloads"));
+}
+
+#[gpui::test]
+fn go_desktop_via_dispatch_action(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("Desktop")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    cx.dispatch_action(nanofm::ui::actions::GoDesktop);
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("Desktop"));
+}
+
+#[gpui::test]
+fn missing_place_shows_banner(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-a");
+    assert_eq!(dir_of(&b, cx), t.path());
+    let want = format!("The folder \u{201C}{}\u{201D} can\u{2019}t be found.", t.path().join("Applications").display());
+    assert_eq!(banner_of(&b, cx), Some(want));
+}
+
+#[gpui::test]
+fn shift_cmd_g_folder(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a")).unwrap();
+    fs::create_dir_all(t.path().join("b")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-g");
+    assert_eq!(goto_text(&b, cx), Some("~/a".into()));
+    let sel = cx.read(|cx| b.read(cx).go_to_input().unwrap().read(cx).selected_range());
+    assert_eq!(sel, 0..3);
+    cx.simulate_input("../b");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert!(!goto_open(&b, cx));
+    // relative input resolves against the current folder
+    assert_eq!(dir_of(&b, cx), t.path().join("b"));
+}
+
+#[gpui::test]
+fn shift_cmd_g_file_selects_in_parent(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("sub")).unwrap();
+    fs::write(t.path().join("sub").join("f.txt"), "x").unwrap();
+    fs::write(t.path().join("sub").join("g.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("~/sub/g.txt");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path().join("sub"));
+    assert_eq!(selected(&b, 1, cx), Some("g.txt".into()));
+}
+
+#[gpui::test]
+fn shift_cmd_g_tilde(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("  ~  ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn shift_cmd_g_missing_banner_exact_text(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input(" ~/nope ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path());
+    assert_eq!(banner_of(&b, cx), Some("The folder \u{201C} ~/nope \u{201D} can\u{2019}t be found.".into()));
+}
+
+#[gpui::test]
+fn shift_cmd_g_empty_does_nothing(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("   ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert!(!goto_open(&b, cx));
+    assert_eq!(banner_of(&b, cx), None);
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn go_to_escape_closes_and_toggles(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("a.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    assert!(goto_open(&b, cx));
+    keys(cx, "escape");
+    assert!(!goto_open(&b, cx));
+    // focus is back in the list
+    keys(cx, "down");
+    assert_eq!(selected(&b, 1, cx), Some("a.txt".into()));
+    // the shortcut toggles, also from inside the field
+    keys(cx, "cmd-shift-g");
+    assert!(goto_open(&b, cx));
+    keys(cx, "cmd-shift-g");
+    assert!(!goto_open(&b, cx));
+}
+
+// ---- Phase 5: Copy Path and Reveal ---------------------------------------------------------
+
+/// Fake opener: records reveals (never spawns `open -R`) and opens.
+#[derive(Clone, Default)]
+struct RevealRecorder {
+    revealed: Rc<RefCell<Vec<Vec<PathBuf>>>>,
+    opened: Rc<RefCell<Vec<PathBuf>>>,
+}
+
+impl Opener for RevealRecorder {
+    fn open(&self, _cx: &mut gpui::App, path: &Path) {
+        self.opened.borrow_mut().push(path.to_path_buf());
+    }
+    fn reveal(&self, paths: &[PathBuf]) {
+        self.revealed.borrow_mut().push(paths.to_vec());
+    }
+}
+
+fn mount_rec<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &Path,
+    rec: &RevealRecorder,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, op, home) = (dir.to_path_buf(), rec.clone(), dir.to_path_buf());
+    mount_opts(cx, move || BrowserOptions {
+        start: Some(start),
+        opener: Rc::new(op),
+        places: Places::rooted(home),
+        ..Default::default()
+    })
+}
+
+fn clipboard_text(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+}
+
+#[gpui::test]
+fn alt_cmd_c_copies_selection_newline_joined(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (_b, cx) = mount(cx, t.path());
+    keys(cx, "down shift-down");
+    keys(cx, "alt-cmd-c");
+    let want = format!("{}\n{}", t.path().join("a.txt").display(), t.path().join("b.txt").display());
+    assert_eq!(clipboard_text(cx), Some(want));
+}
+
+#[gpui::test]
+fn alt_cmd_c_no_selection_copies_folder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (_b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-c");
+    assert_eq!(clipboard_text(cx), Some(t.path().display().to_string()));
+}
+
+#[gpui::test]
+fn alt_cmd_c_in_rename_types_nothing(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    keys(cx, "alt-cmd-c");
+    assert_eq!(clipboard_text(cx), None);
+    assert_eq!(renaming(&b, cx), Some(("a.txt".into(), 0..1)));
+}
+
+#[gpui::test]
+fn reveal_records_selection_or_folder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_rec(cx, t.path(), &rec);
+    cx.dispatch_action(nanofm::ui::actions::RevealInFinder);
+    cx.run_until_parked();
+    keys(cx, "down");
+    cx.dispatch_action(nanofm::ui::actions::RevealInFinder);
+    cx.run_until_parked();
+    assert_eq!(*rec.revealed.borrow(), [vec![t.path().to_path_buf()], vec![t.path().join("a.txt")]]);
+}
+
+// ---- Phase 5: sidebar toggle ---------------------------------------------------------------
+
+fn sidebar_visible(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).sidebar_visible())
+}
+
+#[gpui::test]
+fn ctrl_cmd_s_toggles_and_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[t.path()], 0));
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert!(sidebar_visible(&b, cx));
+    keys(cx, "ctrl-cmd-s");
+    assert!(!sidebar_visible(&b, cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(!StateStore::new(state.path()).load().sidebar_visible);
+    keys(cx, "ctrl-cmd-s");
+    assert!(sidebar_visible(&b, cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(StateStore::new(state.path()).load().sidebar_visible);
+}
+
+#[gpui::test]
+fn sidebar_hidden_state_restored(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let mut s = StateStore::new(state.path()).load_with_home(t.path());
+    s.layout = leaf_snap(&[t.path()], 0);
+    s.sidebar_visible = false;
+    StateStore::new(state.path()).save(&s).unwrap();
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert!(!sidebar_visible(&b, cx));
+}
+
+#[gpui::test]
+fn go_to_typing_ctrl_cmd_s_ignored(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    keys(cx, "ctrl-cmd-s");
+    assert!(sidebar_visible(&b, cx));
+    assert!(goto_open(&b, cx));
+    assert_eq!(goto_text(&b, cx), Some("~".into()));
+}
+
+// ---- Phase 5: Open in New Tab / Split --------------------------------------------------------
+
+fn tab_dirs(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext) -> Vec<PathBuf> {
+    cx.read(|cx| {
+        b.read(cx).pane(PaneId(pane)).unwrap().read(cx).lists().iter().map(|l| l.read(cx).current_dir().to_path_buf()).collect()
+    })
+}
+
+fn two_dirs_and_file() -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("a")).unwrap();
+    fs::create_dir(t.path().join("b")).unwrap();
+    fs::write(t.path().join("f.txt"), "x").unwrap();
+    t
+}
+
+#[gpui::test]
+fn open_in_new_tab_multi_folders(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    keys(cx, "cmd-a");
+    cx.dispatch_action(nanofm::ui::actions::OpenInNewTab);
+    cx.run_until_parked();
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf(), t.path().join("a"), t.path().join("b")]);
+    assert_eq!(dir_of(&b, cx), t.path().join("a"));
+    assert_eq!(*rec.opened.borrow(), [t.path().join("f.txt")]);
+}
+
+#[gpui::test]
+fn open_in_new_tab_no_selection_opens_current_folder(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    cx.dispatch_action(nanofm::ui::actions::OpenInNewTab);
+    cx.run_until_parked();
+    assert_eq!(tab_state(&b, 1, cx), (2, 1));
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf(), t.path().to_path_buf()]);
+    assert!(rec.opened.borrow().is_empty());
+}
+
+#[gpui::test]
+fn open_in_split_rest_as_tabs(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    keys(cx, "cmd-a");
+    cx.dispatch_action(nanofm::ui::actions::OpenInSplit);
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| b.read(cx).layout().clone()), LayoutTree::split(Axis::SideBySide, vec![leaf(1), leaf(2)]));
+    assert_eq!(focused(&b, cx), 2);
+    assert_eq!(tab_state(&b, 2, cx), (2, 0));
+    assert_eq!(tab_dirs(&b, 2, cx), [t.path().join("a"), t.path().join("b")]);
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf()]);
+    assert_eq!(*rec.opened.borrow(), [t.path().join("f.txt")]);
+}
+
+// ---- Phase 5: path bar and status ------------------------------------------------------------
+
+fn crumb_titles(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).crumbs(cx))
+}
+
+fn status_of(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> String {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).status_text(cx))
+}
+
+#[gpui::test]
+fn crumb_click_navigates(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a").join("b")).unwrap();
+    fs::write(t.path().join("a").join("f.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a").join("b"));
+    assert_eq!(crumb_titles(&b, cx), ["Home", "a", "b"]);
+    let r = cx.debug_bounds("crumb-1-1").expect("crumb rendered");
+    cx.simulate_click(r.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("a"));
+    assert_eq!(crumb_titles(&b, cx), ["Home", "a"]);
+    assert_eq!(entry_names(&b, cx), ["b", "f.txt"]);
+    // the home crumb goes home; focus is back in the list for keyboard use
+    let r = cx.debug_bounds("crumb-1-0").expect("home crumb");
+    cx.simulate_click(r.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path());
+    keys(cx, "down");
+    assert_eq!(selected(&b, 1, cx), Some("a".into()));
+}
+
+#[gpui::test]
+fn crumbs_outside_home_start_at_root(cx: &mut TestAppContext) {
+    let home = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, home.path(), other.path());
+    let titles = crumb_titles(&b, cx);
+    assert_eq!(titles[0], "Macintosh HD");
+    assert_eq!(titles.last().map(String::as_str), other.path().file_name().and_then(|n| n.to_str()));
+}
+
+#[gpui::test]
+fn status_counts_and_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    assert_eq!(status_of(&b, cx), "3 items");
+    keys(cx, "down");
+    assert_eq!(status_of(&b, cx), "1 of 3 items selected");
+    keys(cx, "cmd-a");
+    assert_eq!(status_of(&b, cx), "3 of 3 items selected");
+}
+
+#[gpui::test]
+fn status_singular(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("x"), "x").unwrap();
+    let (b, cx) = mount(cx, t.path());
+    assert_eq!(status_of(&b, cx), "1 item");
+}
+
+#[gpui::test]
+fn corrupt_state_renamed_and_tempdir_defaults(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    fs::write(state.path().join("state.json"), "{ definitely not json").unwrap();
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    // defaults come from the rooted home (2x2 grid on its Desktop/Documents/Downloads/Home), never real folders
+    assert_eq!(cx.read(|cx| b.read(cx).favorites().len()), 4);
+    assert!(cx.read(|cx| b.read(cx).favorites().iter().all(|f| f.path.starts_with(t.path()))));
+    let files: Vec<String> =
+        fs::read_dir(state.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("state.json.corrupt-"));
+    assert_eq!(fs::read(state.path().join(&files[0])).unwrap(), b"{ definitely not json");
+}
+
+// ---- Phase 5: asynchronous column view -------------------------------------------------------
+
+fn preview_names(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().expect("column view").read(cx).preview_names())
+}
+
+#[gpui::test]
+fn column_view_async_preview(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    nested(t.path());
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    // Selecting a folder shows its columns at once, but the entries come from a background read.
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    assert_eq!(preview_names(&b, cx), None);
+    cx.run_until_parked();
+    assert_eq!(preview_names(&b, cx), Some(vec!["deep".to_string(), "f.txt".to_string()]));
+}
+
+#[gpui::test]
+fn column_drill_before_preview_loaded_selects_first(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    nested(t.path());
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("sub"));
+    assert_eq!(selected(&b, 1, cx), Some("deep".into()));
+    assert_eq!(preview_names(&b, cx), Some(vec!["x.txt".to_string()]));
+}
+
+// ---- Phase 5 stretch: row context menu -------------------------------------------------------
+
+fn right_click(cx: &mut VisualTestContext, p: gpui::Point<gpui::Pixels>) {
+    cx.simulate_mouse_down(p, gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(p, gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+}
+
+fn menu_open(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).active_list(cx).read(cx).context_menu_open())
+}
+
+fn sel_count(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> usize {
+    cx.read(|cx| b.read(cx).active_list(cx).read(cx).selection_count())
+}
+
+#[gpui::test]
+fn right_click_unselected_row_selects_only_it(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down");
+    let r = cx.debug_bounds("row-2").unwrap();
+    right_click(cx, r.center());
+    assert_eq!(selected(&b, 1, cx), Some("c.txt".into()));
+    assert_eq!(sel_count(&b, cx), 1);
+    assert!(menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn right_click_selected_row_keeps_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-a");
+    let r = cx.debug_bounds("row-0").unwrap();
+    right_click(cx, r.center());
+    assert_eq!(sel_count(&b, cx), 3);
+    assert!(menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn right_click_empty_space_deselects(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-a");
+    let r = cx.debug_bounds("row-2").unwrap();
+    right_click(cx, gpui::point(r.center().x, r.bottom() + gpui::px(60.)));
+    assert_eq!(sel_count(&b, cx), 0);
+    assert!(!menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn context_menu_item_runs_action(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    let r = cx.debug_bounds("row-1").unwrap();
+    right_click(cx, r.center());
+    let item = cx.debug_bounds("ctx-copy-path").expect("menu item rendered");
+    cx.simulate_click(item.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!menu_open(&b, cx));
+    assert_eq!(clipboard_text(cx), Some(t.path().join("b.txt").display().to_string()));
+}
+
+#[gpui::test]
+fn context_menu_reveal_uses_opener(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_rec(cx, t.path(), &rec);
+    let r = cx.debug_bounds("row-0").unwrap();
+    right_click(cx, r.center());
+    let item = cx.debug_bounds("ctx-reveal").expect("menu item rendered");
+    cx.simulate_click(item.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(*rec.revealed.borrow(), [vec![t.path().join("a.txt")]]);
+}
+
+#[gpui::test]
+fn deep_path_keeps_last_crumb_visible(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let deep = t.path().join("alpha_long_name").join("bravo_long_name").join("charlie_long_name").join("delta_long_name").join("current_folder");
+    fs::create_dir_all(&deep).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &deep);
+    cx.simulate_resize(gpui::size(gpui::px(640.), gpui::px(300.)));
+    cx.run_until_parked();
+    let n = crumb_titles(&b, cx).len();
+    assert_eq!(n, 6);
+    let pane = cx.debug_bounds("pane-1").expect("pane");
+    let last = cx.debug_bounds("crumb-1-5").expect("last crumb");
+    assert!(last.left() >= pane.left() && last.right() <= pane.right(), "last crumb {last:?} outside pane {pane:?}");
+}
+
+#[gpui::test]
+fn escape_closes_context_menu(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    let r = cx.debug_bounds("row-1").unwrap();
+    right_click(cx, r.center());
+    assert!(menu_open(&b, cx));
+    keys(cx, "escape");
+    assert!(!menu_open(&b, cx));
+    assert_eq!(selected(&b, 1, cx), Some("b.txt".into()));
+}
+
+fn select_first_pending(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().expect("column view").read(cx).select_first_pending())
+}
+
+#[gpui::test]
+fn column_drill_into_empty_folder_clears_pending_select(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("empty")).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    assert!(select_first_pending(&b, cx));
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("empty"));
+    assert!(!select_first_pending(&b, cx));
+    // Left then Right again: the flag is set and cleared once more.
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnLeft), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    cx.run_until_parked();
+    assert!(!select_first_pending(&b, cx));
 }

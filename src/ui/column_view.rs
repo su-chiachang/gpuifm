@@ -16,22 +16,18 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement, Render, ScrollHandle, Subscription, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 const COL_W: f32 = 220.;
 
+/// A read-only column. Its folder is known at once; the entries arrive from a background read
+/// (`gen` identifies the read whose result this column accepts).
 struct Col {
     dir: PathBuf,
     entries: Vec<FileEntry>,
-}
-
-impl Col {
-    fn load(dir: &Path, hidden: bool, sort: SortOrder) -> Self {
-        let mut entries = list_dir(dir, hidden).unwrap_or_default();
-        sort_entries(&mut entries, sort);
-        Self { dir: dir.to_path_buf(), entries }
-    }
+    loaded: bool,
+    gen_: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -49,13 +45,17 @@ pub struct ColumnView {
     opener: Rc<dyn Opener>,
     scroll: ScrollHandle,
     shown_cols: usize,
+    next_gen: u64,
+    /// Drilled into this folder before its preview had loaded: select its first entry once the
+    /// list has loaded (cleared when that load completes, empty or not, or on navigating away).
+    select_first_after_load: Option<PathBuf>,
     _sub: Subscription,
 }
 
 impl ColumnView {
     pub fn new(list: Entity<FileList>, sort: SortOrder, hidden: bool, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
         let sub = Self::subscribe(&list, cx);
-        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, _sub: sub };
+        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, next_gen: 0, select_first_after_load: None, _sub: sub };
         s.sync_lefts(cx);
         s.update_preview(cx);
         s
@@ -63,11 +63,22 @@ impl ColumnView {
 
     fn subscribe(list: &Entity<FileList>, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe(list, |this, _, ev: &FileListEvent, cx| match ev {
-            FileListEvent::Navigated(_) => {
+            FileListEvent::Navigated(dir) => {
+                if this.select_first_after_load.as_ref() != Some(dir) {
+                    this.select_first_after_load = None;
+                }
                 this.sync_lefts(cx);
                 this.update_preview(cx);
             }
-            FileListEvent::SelectionChanged => this.update_preview(cx),
+            FileListEvent::SelectionChanged => {
+                if this.select_first_after_load.is_some() && this.list.read(cx).is_ready() {
+                    let target = this.select_first_after_load.take();
+                    if target.as_deref() == Some(this.list.read(cx).current_dir()) {
+                        this.list.update(cx, |l, cx| l.select_first(cx));
+                    }
+                }
+                this.update_preview(cx);
+            }
             FileListEvent::ColumnLeft => this.left(cx),
             FileListEvent::ColumnRight => this.right(cx),
             FileListEvent::SortRequested(_) => {}
@@ -98,15 +109,59 @@ impl ColumnView {
         self.reload(cx);
     }
 
-    /// Re-reads the read-only columns from disk.
+    /// Starts a background read of `dir`; the result is accepted by the column carrying the
+    /// returned generation (a newer read of that column supersedes it).
+    fn start_load(&mut self, dir: PathBuf, cx: &mut Context<Self>) -> u64 {
+        self.next_gen += 1;
+        let gen_ = self.next_gen;
+        let (hidden, sort) = (self.hidden, self.sort);
+        cx.spawn(async move |this, cx| {
+            let entries = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut e = list_dir(&dir, hidden).unwrap_or_default();
+                    sort_entries(&mut e, sort);
+                    e
+                })
+                .await;
+            this.update(cx, |this, cx| this.fill(gen_, entries, cx)).ok();
+        })
+        .detach();
+        gen_
+    }
+
+    fn fill(&mut self, gen_: u64, entries: Vec<FileEntry>, cx: &mut Context<Self>) {
+        if let Some(c) = self.lefts.iter_mut().chain(self.preview.iter_mut()).find(|c| c.gen_ == gen_) {
+            c.entries = entries;
+            c.loaded = true;
+            cx.notify();
+        }
+    }
+
+    fn new_col(&mut self, dir: PathBuf, cx: &mut Context<Self>) -> Col {
+        let gen_ = self.start_load(dir.clone(), cx);
+        Col { dir, entries: Vec::new(), loaded: false, gen_ }
+    }
+
+    /// Re-reads the read-only columns from disk (they keep showing the old entries meanwhile).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let (h, s) = (self.hidden, self.sort);
-        for c in &mut self.lefts {
-            *c = Col::load(&c.dir, h, s);
+        for i in 0..self.lefts.len() {
+            let dir = self.lefts[i].dir.clone();
+            self.lefts[i].gen_ = self.start_load(dir, cx);
         }
         self.preview = None;
         self.update_preview(cx);
         cx.notify();
+    }
+
+    /// A first-entry selection is still waiting for the drilled-into folder to load.
+    pub fn select_first_pending(&self) -> bool {
+        self.select_first_after_load.is_some()
+    }
+
+    /// Entry names of the preview column once it has loaded.
+    pub fn preview_names(&self) -> Option<Vec<String>> {
+        self.preview.as_ref().filter(|c| c.loaded).map(|c| c.entries.iter().map(|e| e.name.clone()).collect())
     }
 
     /// Folders of all columns, left to right: ancestors, the current folder, the preview folder.
@@ -125,7 +180,7 @@ impl ColumnView {
         if parent.is_some() && self.lefts.last().map(|c| &c.dir) == parent.as_ref() {
             return;
         }
-        self.lefts = parent.iter().map(|p| Col::load(p, self.hidden, self.sort)).collect();
+        self.lefts = parent.into_iter().map(|p| self.new_col(p, cx)).collect();
         cx.notify();
     }
 
@@ -134,7 +189,7 @@ impl ColumnView {
         if self.preview.as_ref().map(|c| &c.dir) == want.as_ref() {
             return;
         }
-        self.preview = want.map(|d| Col::load(&d, self.hidden, self.sort));
+        self.preview = want.map(|d| self.new_col(d, cx));
         cx.notify();
     }
 
@@ -154,8 +209,11 @@ impl ColumnView {
     fn drill(&mut self, select: Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(p) = self.preview.take() else { return };
         let cur = self.list.read(cx).current_dir().to_path_buf();
-        self.lefts.push(Col::load(&cur, self.hidden, self.sort));
+        let col = self.new_col(cur, cx);
+        self.lefts.push(col);
         let select = select.or_else(|| p.entries.first().map(|e| e.path.clone()));
+        let wait = select.is_none() && !p.loaded;
+        self.select_first_after_load = wait.then(|| p.dir.clone());
         self.list.update(cx, |l, cx| l.replace_current(p.dir, select, cx));
     }
 

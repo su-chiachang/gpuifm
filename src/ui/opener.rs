@@ -12,6 +12,8 @@ pub trait Opener {
         false
     }
     fn close_quick_look(&self) {}
+    /// Shows `paths` selected in Finder.
+    fn reveal(&self, _paths: &[PathBuf]) {}
     /// Whether a preview started by `quick_look` is still showing.
     fn quick_look_open(&self) -> bool {
         false
@@ -47,6 +49,23 @@ impl Opener for SystemOpener {
             }
             Err(_) => false,
         }
+    }
+
+    fn reveal(&self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let paths = paths.to_vec();
+        // Waited on a thread so the child never lingers as a zombie.
+        std::thread::spawn(move || {
+            let _ = Command::new("open")
+                .arg("-R")
+                .args(&paths)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
     }
 
     fn close_quick_look(&self) {

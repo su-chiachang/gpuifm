@@ -1,4 +1,4 @@
-use crate::fm_core::places::{Place, home_dir, list_volumes};
+use crate::fm_core::places::{Place, list_volumes};
 use crate::fm_core::state::SidebarEntry;
 use crate::ui::theme;
 use gpui::{
@@ -38,8 +38,7 @@ pub struct Sidebar {
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
-    pub fn new(active: PathBuf, favorites: Vec<SidebarEntry>, pinned: Vec<SidebarEntry>) -> Self {
-        let home_path = home_dir();
+    pub fn new(active: PathBuf, home_path: PathBuf, favorites: Vec<SidebarEntry>, pinned: Vec<SidebarEntry>) -> Self {
         let title = home_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

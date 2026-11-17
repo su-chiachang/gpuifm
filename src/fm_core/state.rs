@@ -111,10 +111,22 @@ impl StateStore {
         self.dir.join("state.json")
     }
 
-    /// Missing or corrupt file -> defaults for `home`. Never touches anything but state.json.
+    /// Missing or unreadable file -> defaults for `home`. A file that does not parse is first
+    /// renamed to `state.json.corrupt-<unix_millis>` (so the next save cannot destroy it), then
+    /// defaults are returned. Never touches anything but state.json in the state directory.
     pub fn load_with_home(&self, home: &Path) -> PersistedState {
         let Ok(bytes) = fs::read(self.file()) else { return defaults(home) };
-        let Ok(mut s) = serde_json::from_slice::<PersistedState>(&bytes) else { return defaults(home) };
+        let mut s = match serde_json::from_slice::<PersistedState>(&bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                let millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let _ = fs::rename(self.file(), self.dir.join(format!("state.json.corrupt-{millis}")));
+                return defaults(home);
+            }
+        };
         match s.layout.clone().normalized() {
             Some(l) => s.layout = l,
             None => s.layout = defaults(home).layout,
@@ -206,8 +218,15 @@ mod tests {
         let store = StateStore::new(t.path());
         let home = Path::new("/h");
         assert_eq!(store.load_with_home(home), defaults(home));
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0, "missing file: nothing renamed or created");
         fs::write(store.file(), "{not json").unwrap();
         assert_eq!(store.load_with_home(home), defaults(home));
+        let files: Vec<String> =
+            fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].starts_with("state.json.corrupt-"), "{files:?}");
+        assert_eq!(fs::read(t.path().join(&files[0])).unwrap(), b"{not json");
+        assert!(!store.file().exists());
     }
 
     #[test]

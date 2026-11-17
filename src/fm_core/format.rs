@@ -30,6 +30,15 @@ pub fn format_size(size: Option<u64>) -> String {
     format!("{s} {u}")
 }
 
+pub fn items(n: usize) -> String {
+    if n == 1 { "1 item".into() } else { format!("{n} items") }
+}
+
+/// Path-bar status: item count, or "S of N items selected" when something is selected.
+pub fn status(selected: usize, n: usize) -> String {
+    if selected == 0 { items(n) } else { format!("{selected} of {n} items selected") }
+}
+
 pub fn format_modified(t: Option<SystemTime>, now: SystemTime) -> String {
     let Some(t) = t else {
         return "--".into();
@@ -64,6 +73,15 @@ mod tests {
         assert_eq!(format_size(Some(999)), "999 bytes");
         assert_eq!(format_size(Some(1000)), "1 KB");
         assert_eq!(format_size(Some(1_500_000)), "1.5 MB");
+    }
+
+    #[test]
+    fn counts() {
+        assert_eq!(items(0), "0 items");
+        assert_eq!(items(1), "1 item");
+        assert_eq!(items(5), "5 items");
+        assert_eq!(status(0, 5), "5 items");
+        assert_eq!(status(2, 5), "2 of 5 items selected");
     }
 
     #[test]

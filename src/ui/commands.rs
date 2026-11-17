@@ -40,6 +40,17 @@ pub fn all() -> Vec<CommandDef> {
         cmd!("go.back", "Back", "Go", "\u{2318}[", GoBack),
         cmd!("go.forward", "Forward", "Go", "\u{2318}]", GoForward),
         cmd!("go.enclosing", "Enclosing Folder", "Go", "\u{2318}\u{2191}", GoParent),
+        cmd!("go.home", "Go to Home", "Go", "\u{21E7}\u{2318}H", GoHome),
+        cmd!("go.desktop", "Go to Desktop", "Go", "", GoDesktop),
+        cmd!("go.documents", "Go to Documents", "Go", "", GoDocuments),
+        cmd!("go.downloads", "Go to Downloads", "Go", "\u{2325}\u{2318}L", GoDownloads),
+        cmd!("go.applications", "Go to Applications", "Go", "\u{21E7}\u{2318}A", GoApplications),
+        cmd!("go.goto", "Go to Folder\u{2026}", "Go", "\u{21E7}\u{2318}G", GoToFolder),
+        cmd!("file.openNewTab", "Open in New Tab", "File", "", OpenInNewTab),
+        cmd!("file.openSplit", "Open in Split", "File", "", OpenInSplit),
+        cmd!("file.reveal", "Reveal in Finder", "File", "", RevealInFinder),
+        cmd!("file.copyPath", "Copy Path", "File", "\u{2325}\u{2318}C", CopyPath),
+        cmd!("view.sidebar", "Toggle Sidebar", "View", "\u{2303}\u{2318}S", ToggleSidebar),
         cmd!("view.hidden", "Show Hidden Files", "View", "\u{21E7}\u{2318}.", ToggleHidden),
         cmd!("view.list", "as List", "View", "\u{2318}1", ViewList),
         cmd!("view.column", "as Columns", "View", "\u{2318}2", ViewColumn),
@@ -71,5 +82,14 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), all.len());
         assert!(find("tab.new").is_some());
+    }
+
+    #[test]
+    fn no_duplicate_shortcuts() {
+        let mut keys: Vec<_> = all().iter().map(|c| c.shortcut).filter(|k| !k.is_empty()).collect();
+        let n = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), n);
     }
 }

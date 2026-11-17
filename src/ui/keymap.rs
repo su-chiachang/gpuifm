@@ -35,6 +35,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", SplitDown, Some("Browser")),
         KeyBinding::new("alt-cmd-right", FocusNextPane, Some("Browser")),
         KeyBinding::new("alt-cmd-left", FocusPrevPane, Some("Browser")),
+        KeyBinding::new("cmd-shift-h", GoHome, Some("Browser")),
+        KeyBinding::new("alt-cmd-l", GoDownloads, Some("Browser")),
+        KeyBinding::new("cmd-shift-a", GoApplications, Some("Browser")),
+        KeyBinding::new("cmd-shift-g", GoToFolder, Some("Browser")),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Browser")),
+        KeyBinding::new("alt-cmd-c", CopyPath, Some("FileList")),
         KeyBinding::new("cmd-k", TogglePalette, Some("Browser")),
         KeyBinding::new("cmd-f", FocusFilter, Some("Browser")),
         KeyBinding::new("ctrl-cmd-t", PinSelection, Some("Browser")),
@@ -44,6 +50,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-y", QuickLook, Some("FileList")),
         KeyBinding::new("left", ColumnLeft, Some("FileList && compact")),
         KeyBinding::new("right", ColumnRight, Some("FileList && compact")),
+        KeyBinding::new("escape", CloseMenu, Some("FileList && menu")),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     crate::ui::text_input::bind_keys(cx);
@@ -54,5 +61,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-enter", PaletteOpenTab, Some("Palette > TextInput")),
         KeyBinding::new("alt-enter", PaletteOpenSplit, Some("Palette > TextInput")),
         KeyBinding::new("down", FilterDown, Some("Filter > TextInput")),
+        // Shift-cmd-G inside the Go to Folder field closes it again.
+        KeyBinding::new("cmd-shift-g", GoToFolder, Some("GoTo > TextInput")),
     ]);
 }

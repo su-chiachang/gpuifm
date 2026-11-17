@@ -1,5 +1,5 @@
 use crate::fm_core::layout::{Axis, LayoutTree, PaneId, Side, focus_after_close};
-use crate::fm_core::places::{self, home_dir};
+use crate::fm_core::places::{self, GoTarget, Places};
 use crate::fm_core::search_index::{self, IndexEntry};
 use crate::fm_core::sort::SortOrder;
 use crate::fm_core::watch::{DirWatcher, canon};
@@ -13,6 +13,7 @@ use crate::ui::ops::{FileOps, FileOpsEvent};
 use crate::ui::palette::{Choice, OpenMode, Palette, PaletteEvent};
 use crate::ui::pane::{Pane, PaneEvent};
 use crate::ui::sidebar::{Group, Sidebar, SidebarEvent};
+use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription,
@@ -42,12 +43,25 @@ pub struct BrowserOptions {
     pub opener: Rc<dyn Opener>,
     /// Watch the open tabs' folders for outside changes (tests drive `dirs_changed` instead).
     pub watch: bool,
+    /// Home and the Go menu's folders; tests root them in a tempdir.
+    pub places: Places,
 }
 
 impl Default for BrowserOptions {
     fn default() -> Self {
-        Self { start: None, store: None, index_roots: None, opener: Rc::new(SystemOpener::default()), watch: false }
+        Self {
+            start: None,
+            store: None,
+            index_roots: None,
+            opener: Rc::new(SystemOpener::default()),
+            watch: false,
+            places: Places::system(),
+        }
     }
+}
+
+fn not_found(raw: &str) -> String {
+    format!("The folder \u{201C}{raw}\u{201D} can\u{2019}t be found.")
 }
 
 /// Drag payload for a split divider: which split (by child-index path) and which divider in it.
@@ -74,6 +88,7 @@ pub struct Browser {
     focused: PaneId,
     next_pane_id: u64,
     show_hidden: bool,
+    sidebar_visible: bool,
     title: String,
     banner: Option<(u64, String)>,
     banner_id: u64,
@@ -81,6 +96,7 @@ pub struct Browser {
     favorites: Vec<SidebarEntry>,
     pinned: Vec<SidebarEntry>,
     opener: Rc<dyn Opener>,
+    places: Places,
     store: Option<StateStore>,
     last_saved: Option<PersistedState>,
     save_gen: u64,
@@ -92,6 +108,8 @@ pub struct Browser {
     index_gen: u64,
     _index_task: Option<Task<()>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    goto: Option<(Entity<TextInput>, Vec<Subscription>)>,
+    goto_focus_pending: bool,
     ql_paths: Vec<PathBuf>,
     watcher: Option<DirWatcher>,
     dirty: BTreeSet<PathBuf>,
@@ -108,18 +126,18 @@ impl Browser {
     }
 
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let BrowserOptions { start, store, index_roots, opener, watch } = opts;
-        let loaded = store.as_ref().map(|s| s.load());
-        let (favorites, pinned, show_hidden) = match &loaded {
-            Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden),
-            None => (Vec::new(), Vec::new(), false),
+        let BrowserOptions { start, store, index_roots, opener, watch, places } = opts;
+        let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
+        let (favorites, pinned, show_hidden, sidebar_visible) = match &loaded {
+            Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden, l.sidebar_visible),
+            None => (Vec::new(), Vec::new(), false, true),
         };
         let restored = match (&start, &loaded) {
             (None, Some(l)) => restore(l, |p| p.is_dir()),
             _ => None,
         };
         let tree = restored.unwrap_or_else(|| {
-            LayoutTree::Leaf(PaneSnapshot { tabs: vec![start.clone().unwrap_or_else(home_dir)], ..Default::default() })
+            LayoutTree::Leaf(PaneSnapshot { tabs: vec![start.clone().unwrap_or_else(|| places.home.clone())], ..Default::default() })
         });
         let mut next = 1u64;
         let layout = tree.map(&mut |_| {
@@ -131,10 +149,10 @@ impl Browser {
         let first = PaneId(1);
         let first_dir = {
             let s = &snaps[0];
-            s.tabs.get(s.active).cloned().unwrap_or_else(home_dir)
+            s.tabs.get(s.active).cloned().unwrap_or_else(|| places.home.clone())
         };
 
-        let sidebar = cx.new(|_| Sidebar::new(first_dir, favorites.clone(), pinned.clone()));
+        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone()));
         let ops = cx.new(|_| FileOps::new());
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(
@@ -177,6 +195,7 @@ impl Browser {
             focused: first,
             next_pane_id: next,
             show_hidden,
+            sidebar_visible,
             title: String::new(),
             banner: None,
             banner_id: 0,
@@ -184,6 +203,7 @@ impl Browser {
             favorites,
             pinned,
             opener,
+            places,
             store,
             last_saved: loaded,
             save_gen: 0,
@@ -195,6 +215,8 @@ impl Browser {
             index_gen: 0,
             _index_task: None,
             palette: None,
+            goto: None,
+            goto_focus_pending: false,
             ql_paths: Vec::new(),
             watcher: None,
             dirty: BTreeSet::new(),
@@ -226,6 +248,9 @@ impl Browser {
                 this.update(cx, |this, cx| this.rebuild_index(cx)).ok();
             })
             .detach();
+        }
+        if !sidebar_visible {
+            this.rebuild_menus(cx);
         }
         // Keys only fire when something focused is in the dispatch path.
         this.focus_pane(first, window, cx);
@@ -272,6 +297,15 @@ impl Browser {
         self.palette.as_ref().map(|(p, _)| p)
     }
 
+    /// The Go to Folder field while the overlay is open.
+    pub fn go_to_input(&self) -> Option<&Entity<TextInput>> {
+        self.goto.as_ref().map(|(i, _)| i)
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible
+    }
+
     pub fn pane(&self, id: PaneId) -> Option<&Entity<Pane>> {
         self.panes.get(&id)
     }
@@ -283,10 +317,10 @@ impl Browser {
     // ---- pane management ---------------------------------------------------------------------
 
     fn create_pane(&mut self, id: PaneId, snap: PaneSnapshot, sort: SortOrder, window: &mut Window, cx: &mut Context<Self>) {
-        let (ops, opener, hidden) = (self.ops.clone(), self.opener.clone(), self.show_hidden);
-        let first = snap.tabs.first().cloned().unwrap_or_else(home_dir);
+        let (ops, opener, hidden, home) = (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone());
+        let first = snap.tabs.first().cloned().unwrap_or_else(|| self.places.home.clone());
         let pane = cx.new(|cx| {
-            let mut p = Pane::new(id, first, ops, opener, hidden, sort, snap.view_mode, cx);
+            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, cx);
             p.restore_tabs(&snap, cx);
             p
         });
@@ -434,7 +468,7 @@ impl Browser {
             let o = self.ops.read(cx);
             (o.undo_title(), o.redo_title())
         };
-        menus::rebuild(cx, u.as_deref(), r.as_deref());
+        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible });
     }
 
     fn show_banner(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -577,7 +611,7 @@ impl Browser {
             pinned: self.pinned.clone(),
             layout: self.layout.map(&mut |id| self.panes[id].read(cx).snapshot(cx)),
             show_hidden: self.show_hidden,
-            sidebar_visible: true,
+            sidebar_visible: self.sidebar_visible,
         }
     }
 
@@ -653,7 +687,7 @@ impl Browser {
             None => {
                 let f: Vec<PathBuf> = self.favorites.iter().map(|e| e.path.clone()).collect();
                 let p: Vec<PathBuf> = self.pinned.iter().map(|e| e.path.clone()).collect();
-                search_index::index_roots(&home_dir(), &f, &p)
+                search_index::index_roots(&self.places.home, &f, &p)
             }
         };
         self.index_gen += 1;
@@ -750,6 +784,112 @@ impl Browser {
         }
     }
 
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        self.rebuild_menus(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Open in New Tab / Open in Split: the selection (or the current folder when nothing is
+    /// selected). Files go to the system; folders become one tab each (the first one active), or
+    /// for a split the first in the new pane and the rest as unselected tabs there.
+    fn open_selection(&mut self, mode: OpenMode, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.active_list(cx);
+        if list.read(cx).is_renaming() {
+            return;
+        }
+        let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+            list.read(cx).action_targets().into_iter().partition(|p| p.is_dir());
+        let opener = self.opener.clone();
+        for f in &files {
+            opener.open(cx, f);
+        }
+        let Some((first, rest)) = dirs.split_first() else { return };
+        match mode {
+            OpenMode::NewTab => self.focused_pane().clone().update(cx, |p, cx| p.add_tab(first.clone(), true, cx)),
+            _ => self.open_location(first.clone(), None, OpenMode::Split, window, cx),
+        }
+        self.focused_pane().clone().update(cx, |p, cx| {
+            for d in rest.iter().rev() {
+                p.add_tab(d.clone(), false, cx);
+            }
+        });
+    }
+
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        let list = self.active_list(cx);
+        if list.read(cx).is_renaming() {
+            return;
+        }
+        let targets = list.read(cx).action_targets();
+        self.opener.reveal(&targets);
+    }
+
+    // ---- Go menu -------------------------------------------------------------------------------
+
+    /// Go to Home / Desktop / ...: the folder must exist.
+    fn go_place(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_list(cx).read(cx).is_renaming() {
+            return;
+        }
+        if path.is_dir() {
+            self.open_location(path, None, OpenMode::Here, window, cx);
+        } else {
+            self.show_banner(not_found(&path.display().to_string()), cx);
+        }
+    }
+
+    fn toggle_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goto.is_some() {
+            self.close_goto(window, cx);
+            return;
+        }
+        if self.active_list(cx).read(cx).is_renaming() {
+            return;
+        }
+        if self.palette.is_some() {
+            self.palette = None;
+        }
+        let cur = self.active_list(cx).read(cx).current_dir().to_path_buf();
+        let text = places::abbreviate(&cur, &self.places.home);
+        let n = text.len();
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new(&text, cx);
+            i.select_range(0..n, cx);
+            i
+        });
+        let subs = vec![cx.subscribe_in(&input, window, |this, input, ev: &TextInputEvent, window, cx| match ev {
+            TextInputEvent::Confirm => {
+                let raw = input.read(cx).text().to_string();
+                this.confirm_goto(raw, window, cx);
+            }
+            TextInputEvent::Cancel => this.close_goto(window, cx),
+        })];
+        self.goto = Some((input, subs));
+        self.goto_focus_pending = true;
+        cx.notify();
+    }
+
+    fn close_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goto.take().is_some() {
+            self.goto_focus_pending = false;
+            self.focus_pane(self.focused, window, cx);
+        }
+    }
+
+    fn confirm_goto(&mut self, raw: String, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active_list(cx).read(cx).current_dir().to_path_buf();
+        let target = places::resolve_go_to(&raw, &self.places.home, &cwd);
+        self.close_goto(window, cx);
+        match target {
+            GoTarget::Empty => {}
+            GoTarget::Folder(dir) => self.open_location(dir, None, OpenMode::Here, window, cx),
+            GoTarget::File { dir, select } => self.open_location(dir, Some(select), OpenMode::Here, window, cx),
+            GoTarget::NotFound => self.show_banner(not_found(&raw), cx),
+        }
+    }
+
     fn render_node(&self, node: &LayoutTree<PaneId>, path: Vec<usize>, cx: &mut Context<Self>) -> AnyElement {
         match node {
             LayoutTree::Leaf(id) => {
@@ -830,7 +970,12 @@ impl Focusable for Browser {
 }
 
 impl Render for Browser {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.goto_focus_pending)
+            && let Some((i, _)) = &self.goto
+        {
+            i.read(cx).focus_handle(cx).focus(window);
+        }
         let (can_undo, can_redo) = {
             let o = self.ops.read(cx);
             (o.can_undo(), o.can_redo())
@@ -880,6 +1025,46 @@ impl Render for Browser {
             )
         });
 
+        let goto_overlay = self.goto.as_ref().map(|(input, _)| {
+            deferred(
+                div().absolute().top_0().left_0().size_full().flex().justify_center().pt(px(80.)).child(
+                    div()
+                        .id("goto-overlay")
+                        .key_context("GoTo")
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_goto(window, cx)))
+                        .w(px(480.))
+                        .h_auto()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(theme::TOOLBAR_BG))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_sm()
+                        .text_color(rgb(theme::TEXT))
+                        .child("Go to Folder")
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(theme::ACCENT))
+                                .child(input.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::TEXT_DIM))
+                                .child("Type a folder path; ~ is your home folder. Return to go, Esc to cancel."),
+                        ),
+                ),
+            )
+        });
+
         div()
             .key_context("Browser")
             .track_focus(&self.focus)
@@ -892,6 +1077,18 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &GoForward, _, cx| {
                 this.active_list(cx).update(cx, |l, cx| l.on_forward(cx));
             }))
+            .on_action(cx.listener(|this, _: &GoHome, window, cx| this.go_place(this.places.home.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDesktop, window, cx| this.go_place(this.places.desktop.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDocuments, window, cx| this.go_place(this.places.documents.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDownloads, window, cx| this.go_place(this.places.downloads.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoApplications, window, cx| {
+                this.go_place(this.places.applications.clone(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &OpenInNewTab, window, cx| this.open_selection(OpenMode::NewTab, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenInSplit, window, cx| this.open_selection(OpenMode::Split, window, cx)))
+            .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.focused_pane().clone().update(cx, |p, cx| p.new_tab(cx));
@@ -935,7 +1132,7 @@ impl Render for Browser {
             .size_full()
             .flex()
             .bg(rgb(theme::BG))
-            .child(self.sidebar.clone())
+            .when(self.sidebar_visible, |d| d.child(self.sidebar.clone()))
             .child(
                 div()
                     .flex()
@@ -947,5 +1144,6 @@ impl Render for Browser {
                     .child(div().flex_1().min_h_0().child(panes)),
             )
             .children(overlay)
+            .children(goto_overlay)
     }
 }
