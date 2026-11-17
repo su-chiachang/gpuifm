@@ -93,6 +93,10 @@ fn leaf_of(p: &Path) -> String {
 }
 
 impl FileList {
+    pub fn scroll_handle(&self) -> UniformListScrollHandle {
+        self.scroll.clone()
+    }
+
     pub fn new(
         start: PathBuf,
         ops: Entity<FileOps>,
