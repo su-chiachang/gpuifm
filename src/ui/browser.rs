@@ -791,6 +791,32 @@ impl Browser {
         cx.notify();
     }
 
+    /// Open in New Tab / Open in Split: the selection (or the current folder when nothing is
+    /// selected). Files go to the system; folders become one tab each (the first one active), or
+    /// for a split the first in the new pane and the rest as unselected tabs there.
+    fn open_selection(&mut self, mode: OpenMode, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.active_list(cx);
+        if list.read(cx).is_renaming() {
+            return;
+        }
+        let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+            list.read(cx).action_targets().into_iter().partition(|p| p.is_dir());
+        let opener = self.opener.clone();
+        for f in &files {
+            opener.open(cx, f);
+        }
+        let Some((first, rest)) = dirs.split_first() else { return };
+        match mode {
+            OpenMode::NewTab => self.focused_pane().clone().update(cx, |p, cx| p.add_tab(first.clone(), true, cx)),
+            _ => self.open_location(first.clone(), None, OpenMode::Split, window, cx),
+        }
+        self.focused_pane().clone().update(cx, |p, cx| {
+            for d in rest.iter().rev() {
+                p.add_tab(d.clone(), false, cx);
+            }
+        });
+    }
+
     fn reveal(&mut self, cx: &mut Context<Self>) {
         let list = self.active_list(cx);
         if list.read(cx).is_renaming() {
@@ -1060,6 +1086,8 @@ impl Render for Browser {
             }))
             .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &OpenInNewTab, window, cx| this.open_selection(OpenMode::NewTab, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenInSplit, window, cx| this.open_selection(OpenMode::Split, window, cx)))
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {

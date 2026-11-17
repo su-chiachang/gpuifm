@@ -1405,3 +1405,61 @@ fn go_to_typing_ctrl_cmd_s_ignored(cx: &mut TestAppContext) {
     assert!(goto_open(&b, cx));
     assert_eq!(goto_text(&b, cx), Some("~".into()));
 }
+
+// ---- Phase 5: Open in New Tab / Split --------------------------------------------------------
+
+fn tab_dirs(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext) -> Vec<PathBuf> {
+    cx.read(|cx| {
+        b.read(cx).pane(PaneId(pane)).unwrap().read(cx).lists().iter().map(|l| l.read(cx).current_dir().to_path_buf()).collect()
+    })
+}
+
+fn two_dirs_and_file() -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("a")).unwrap();
+    fs::create_dir(t.path().join("b")).unwrap();
+    fs::write(t.path().join("f.txt"), "x").unwrap();
+    t
+}
+
+#[gpui::test]
+fn open_in_new_tab_multi_folders(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    keys(cx, "cmd-a");
+    cx.dispatch_action(nanofm::ui::actions::OpenInNewTab);
+    cx.run_until_parked();
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf(), t.path().join("a"), t.path().join("b")]);
+    assert_eq!(dir_of(&b, cx), t.path().join("a"));
+    assert_eq!(*rec.opened.borrow(), [t.path().join("f.txt")]);
+}
+
+#[gpui::test]
+fn open_in_new_tab_no_selection_opens_current_folder(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    cx.dispatch_action(nanofm::ui::actions::OpenInNewTab);
+    cx.run_until_parked();
+    assert_eq!(tab_state(&b, 1, cx), (2, 1));
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf(), t.path().to_path_buf()]);
+    assert!(rec.opened.borrow().is_empty());
+}
+
+#[gpui::test]
+fn open_in_split_rest_as_tabs(cx: &mut TestAppContext) {
+    let t = two_dirs_and_file();
+    let rec = RevealRecorder::default();
+    let (b, cx) = mount_rec(cx, t.path(), &rec);
+    keys(cx, "cmd-a");
+    cx.dispatch_action(nanofm::ui::actions::OpenInSplit);
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| b.read(cx).layout().clone()), LayoutTree::split(Axis::SideBySide, vec![leaf(1), leaf(2)]));
+    assert_eq!(focused(&b, cx), 2);
+    assert_eq!(tab_state(&b, 2, cx), (2, 0));
+    assert_eq!(tab_dirs(&b, 2, cx), [t.path().join("a"), t.path().join("b")]);
+    assert_eq!(tab_dirs(&b, 1, cx), [t.path().to_path_buf()]);
+    assert_eq!(*rec.opened.borrow(), [t.path().join("f.txt")]);
+}

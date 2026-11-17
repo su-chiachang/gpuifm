@@ -325,6 +325,23 @@ impl Pane {
         cx.notify();
     }
 
+    /// Adds a tab for `dir` right after the active one; `activate` selects it, otherwise the
+    /// active tab stays where it is. Adding several background tabs in reverse keeps their order.
+    pub fn add_tab(&mut self, dir: PathBuf, activate: bool, cx: &mut Context<Self>) {
+        let (hidden, prev) = (self.show_hidden, self.tabs.active());
+        let tab = Self::make_tab(dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        self.tabs.add_after_active(tab);
+        if !activate {
+            self.tabs.select(prev);
+        }
+        self.apply_filter(cx);
+        cx.emit(PaneEvent::Changed);
+        if activate {
+            cx.emit(PaneEvent::Refocus);
+        }
+        cx.notify();
+    }
+
     /// Closes tab `ix`; a pane's only tab is left for the browser to deal with.
     pub fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if self.tabs.len() < 2 {
