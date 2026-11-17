@@ -230,6 +230,11 @@ impl FileList {
         self.entries.iter().map(|e| e.name.clone()).collect()
     }
 
+    /// The listing for the current directory has loaded.
+    pub fn is_ready(&self) -> bool {
+        self.ready()
+    }
+
     /// Entries on screen belong to the current directory.
     fn ready(&self) -> bool {
         self.entries_dir.as_deref() == Some(self.history.current())

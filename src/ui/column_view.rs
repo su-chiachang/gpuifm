@@ -46,15 +46,16 @@ pub struct ColumnView {
     scroll: ScrollHandle,
     shown_cols: usize,
     next_gen: u64,
-    /// Drilled into a preview that had not loaded yet: select the first entry once the list has.
-    select_first_after_load: bool,
+    /// Drilled into this folder before its preview had loaded: select its first entry once the
+    /// list has loaded (cleared when that load completes, empty or not, or on navigating away).
+    select_first_after_load: Option<PathBuf>,
     _sub: Subscription,
 }
 
 impl ColumnView {
     pub fn new(list: Entity<FileList>, sort: SortOrder, hidden: bool, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
         let sub = Self::subscribe(&list, cx);
-        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, next_gen: 0, select_first_after_load: false, _sub: sub };
+        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, next_gen: 0, select_first_after_load: None, _sub: sub };
         s.sync_lefts(cx);
         s.update_preview(cx);
         s
@@ -62,13 +63,19 @@ impl ColumnView {
 
     fn subscribe(list: &Entity<FileList>, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe(list, |this, _, ev: &FileListEvent, cx| match ev {
-            FileListEvent::Navigated(_) => {
+            FileListEvent::Navigated(dir) => {
+                if this.select_first_after_load.as_ref() != Some(dir) {
+                    this.select_first_after_load = None;
+                }
                 this.sync_lefts(cx);
                 this.update_preview(cx);
             }
             FileListEvent::SelectionChanged => {
-                if std::mem::take(&mut this.select_first_after_load) {
-                    this.list.update(cx, |l, cx| l.select_first(cx));
+                if this.select_first_after_load.is_some() && this.list.read(cx).is_ready() {
+                    let target = this.select_first_after_load.take();
+                    if target.as_deref() == Some(this.list.read(cx).current_dir()) {
+                        this.list.update(cx, |l, cx| l.select_first(cx));
+                    }
                 }
                 this.update_preview(cx);
             }
@@ -147,6 +154,11 @@ impl ColumnView {
         cx.notify();
     }
 
+    /// A first-entry selection is still waiting for the drilled-into folder to load.
+    pub fn select_first_pending(&self) -> bool {
+        self.select_first_after_load.is_some()
+    }
+
     /// Entry names of the preview column once it has loaded.
     pub fn preview_names(&self) -> Option<Vec<String>> {
         self.preview.as_ref().filter(|c| c.loaded).map(|c| c.entries.iter().map(|e| e.name.clone()).collect())
@@ -200,7 +212,8 @@ impl ColumnView {
         let col = self.new_col(cur, cx);
         self.lefts.push(col);
         let select = select.or_else(|| p.entries.first().map(|e| e.path.clone()));
-        self.select_first_after_load = select.is_none() && !p.loaded;
+        let wait = select.is_none() && !p.loaded;
+        self.select_first_after_load = wait.then(|| p.dir.clone());
         self.list.update(cx, |l, cx| l.replace_current(p.dir, select, cx));
     }
 

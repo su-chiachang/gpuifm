@@ -1669,3 +1669,27 @@ fn deep_path_keeps_last_crumb_visible(cx: &mut TestAppContext) {
     let last = cx.debug_bounds("crumb-1-5").expect("last crumb");
     assert!(last.left() >= pane.left() && last.right() <= pane.right(), "last crumb {last:?} outside pane {pane:?}");
 }
+
+fn select_first_pending(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().expect("column view").read(cx).select_first_pending())
+}
+
+#[gpui::test]
+fn column_drill_into_empty_folder_clears_pending_select(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("empty")).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    assert!(select_first_pending(&b, cx));
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("empty"));
+    assert!(!select_first_pending(&b, cx));
+    // Left then Right again: the flag is set and cleared once more.
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnLeft), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    cx.run_until_parked();
+    assert!(!select_first_pending(&b, cx));
+}
