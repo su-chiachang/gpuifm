@@ -104,6 +104,12 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-y",
         "cmd-1",
         "cmd-2",
+        "cmd-shift-h",
+        "alt-cmd-l",
+        "cmd-shift-a",
+        "cmd-shift-g",
+        "ctrl-cmd-s",
+        "alt-cmd-c",
     ] {
         b.push(KeyBinding::new(k, NoAction, c));
     }

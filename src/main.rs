@@ -24,7 +24,7 @@ fn main() {
             }
         })
         .detach();
-        nanofm::ui::menus::rebuild(cx, None, None);
+        nanofm::ui::menus::rebuild(cx, &nanofm::ui::menus::MenuState { undo: None, redo: None, sidebar_visible: true });
 
         let bounds = Bounds::centered(None, size(px(1000.), px(640.)), cx);
         cx.open_window(

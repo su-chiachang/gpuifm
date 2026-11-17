@@ -434,7 +434,7 @@ impl Browser {
             let o = self.ops.read(cx);
             (o.undo_title(), o.redo_title())
         };
-        menus::rebuild(cx, u.as_deref(), r.as_deref());
+        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: true });
     }
 
     fn show_banner(&mut self, msg: String, cx: &mut Context<Self>) {

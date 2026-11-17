@@ -46,6 +46,17 @@ actions!(
         PaletteDown,
         PaletteOpenTab,
         PaletteOpenSplit,
+        GoHome,
+        GoDesktop,
+        GoDocuments,
+        GoDownloads,
+        GoApplications,
+        GoToFolder,
+        CopyPath,
+        RevealInFinder,
+        ToggleSidebar,
+        OpenInNewTab,
+        OpenInSplit,
         Quit
     ]
 );
