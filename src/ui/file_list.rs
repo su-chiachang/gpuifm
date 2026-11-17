@@ -12,9 +12,9 @@ use crate::ui::opener::Opener;
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
-    ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
-    ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    Action, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window,
+    anchored, deferred, div, prelude::*, px, rgb, uniform_list,
 };
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -68,6 +68,8 @@ pub struct FileList {
     load_task: Option<Task<()>>,
     ops: Entity<FileOps>,
     rename: Option<RenameSession>,
+    /// Row context menu: where it was opened.
+    menu: Option<Point<Pixels>>,
     focus_rename: bool,
     rename_request: bool,
     reload_after_rename: bool,
@@ -130,6 +132,7 @@ impl FileList {
             load_task: None,
             ops,
             rename: None,
+            menu: None,
             focus_rename: false,
             rename_request: false,
             reload_after_rename: false,
@@ -186,6 +189,10 @@ impl FileList {
     /// Paths of the selected entries.
     pub fn selection_paths(&self) -> Vec<PathBuf> {
         self.selected_paths()
+    }
+
+    pub fn context_menu_open(&self) -> bool {
+        self.menu.is_some()
     }
 
     /// Entries on screen (after the filter).
@@ -309,6 +316,7 @@ impl FileList {
         self.entries.clear();
         self.entries_dir = None;
         self.selection.clear();
+        self.menu = None;
         self.reload(cx);
         cx.emit(FileListEvent::Navigated(self.history.current().to_path_buf()));
         cx.notify();
@@ -658,6 +666,35 @@ impl FileList {
         cx.notify();
     }
 
+    fn menu_item(
+        &self,
+        tag: &'static str,
+        label: &'static str,
+        action: fn() -> Box<dyn Action>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(tag)
+            .debug_selector(move || tag.to_string())
+            .px_3()
+            .py_1()
+            .cursor_pointer()
+            .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+            .child(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.menu = None;
+                this.focus.focus(window);
+                // Run the ordinary action once the menu is gone and focus is in the list.
+                let a = action();
+                cx.defer_in(window, move |_, window, cx| window.dispatch_action(a, cx));
+                cx.notify();
+            }))
+    }
+
+    fn separator() -> impl IntoElement {
+        div().h(px(1.)).my_1().bg(rgb(theme::BORDER))
+    }
+
     fn header_cell(&self, key: SortKey, label: &'static str, w: Option<f32>, cx: &mut Context<Self>) -> impl IntoElement {
         let tag = match key {
             SortKey::Name => "name",
@@ -776,6 +813,23 @@ impl Render for FileList {
                                 .text_color(rgb(theme::TEXT))
                                 .when(is_sel, |d| d.bg(rgb(theme::SELECTED_BG)))
                                 .when(!is_sel, |d| d.hover(|d| d.bg(rgb(theme::HOVER_BG))))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        // The list's own right-click (empty space) must not also run.
+                                        cx.stop_propagation();
+                                        if !this.can_act() {
+                                            return;
+                                        }
+                                        if !this.selection.contains(ix) {
+                                            this.selection.set(Some(ix));
+                                            cx.emit(FileListEvent::SelectionChanged);
+                                        }
+                                        this.focus.focus(window);
+                                        this.menu = Some(ev.position);
+                                        cx.notify();
+                                    }),
+                                )
                                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                                     if !this.ready() {
                                         return;
@@ -844,9 +898,59 @@ impl Render for FileList {
             .into_any_element()
         };
 
+        let menu = self.menu.map(|pos| {
+            let single = self.selection.count() == 1;
+            let m = div()
+                .id("file-menu")
+                .occlude()
+                .min_w(px(190.))
+                .py_1()
+                .rounded_md()
+                .bg(rgb(theme::TOOLBAR_BG))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .text_sm()
+                .text_color(rgb(theme::TEXT))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    cx.notify();
+                }))
+                .child(self.menu_item("ctx-open", "Open", || Box::new(OpenSelected), cx))
+                .child(self.menu_item("ctx-new-tab", "Open in New Tab", || Box::new(OpenInNewTab), cx))
+                .child(self.menu_item("ctx-split", "Open in Split", || Box::new(OpenInSplit), cx))
+                .child(self.menu_item("ctx-quicklook", "Quick Look", || Box::new(QuickLook), cx))
+                .child(Self::separator())
+                .when(single, |d| d.child(self.menu_item("ctx-rename", "Rename", || Box::new(BeginRename), cx)))
+                .child(self.menu_item("ctx-duplicate", "Duplicate", || Box::new(Duplicate), cx))
+                .child(self.menu_item("ctx-copy", "Copy", || Box::new(CopyItems), cx))
+                .child(self.menu_item("ctx-copy-path", "Copy Path", || Box::new(CopyPath), cx))
+                .child(Self::separator())
+                .child(self.menu_item("ctx-trash", "Move to Trash", || Box::new(TrashItems), cx))
+                .child(Self::separator())
+                .child(self.menu_item("ctx-reveal", "Reveal in Finder", || Box::new(RevealInFinder), cx))
+                .child(self.menu_item("ctx-pin", "Pin to Sidebar", || Box::new(PinSelection), cx));
+            deferred(anchored().position(pos).snap_to_window().child(m))
+        });
+
         div()
             .key_context(if compact { "FileList compact" } else { "FileList" })
             .track_focus(&self.focus)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    // Empty space: drop the selection.
+                    if !this.can_act() {
+                        return;
+                    }
+                    this.menu = None;
+                    if this.selection.count() > 0 {
+                        this.selection.clear();
+                        cx.emit(FileListEvent::SelectionChanged);
+                    }
+                    this.focus.focus(window);
+                    cx.notify();
+                }),
+            )
             .on_action(cx.listener(|this, _: &ColumnLeft, _, cx| {
                 if this.can_act() {
                     cx.emit(FileListEvent::ColumnLeft);
@@ -879,5 +983,6 @@ impl Render for FileList {
             .bg(rgb(theme::BG))
             .when(!compact, |d| d.child(header))
             .child(body)
+            .children(menu)
     }
 }

@@ -1578,3 +1578,79 @@ fn column_drill_before_preview_loaded_selects_first(cx: &mut TestAppContext) {
     assert_eq!(selected(&b, 1, cx), Some("deep".into()));
     assert_eq!(preview_names(&b, cx), Some(vec!["x.txt".to_string()]));
 }
+
+// ---- Phase 5 stretch: row context menu -------------------------------------------------------
+
+fn right_click(cx: &mut VisualTestContext, p: gpui::Point<gpui::Pixels>) {
+    cx.simulate_mouse_down(p, gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(p, gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+}
+
+fn menu_open(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).active_list(cx).read(cx).context_menu_open())
+}
+
+fn sel_count(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> usize {
+    cx.read(|cx| b.read(cx).active_list(cx).read(cx).selection_count())
+}
+
+#[gpui::test]
+fn right_click_unselected_row_selects_only_it(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down");
+    let r = cx.debug_bounds("row-2").unwrap();
+    right_click(cx, r.center());
+    assert_eq!(selected(&b, 1, cx), Some("c.txt".into()));
+    assert_eq!(sel_count(&b, cx), 1);
+    assert!(menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn right_click_selected_row_keeps_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-a");
+    let r = cx.debug_bounds("row-0").unwrap();
+    right_click(cx, r.center());
+    assert_eq!(sel_count(&b, cx), 3);
+    assert!(menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn right_click_empty_space_deselects(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-a");
+    let r = cx.debug_bounds("row-2").unwrap();
+    right_click(cx, gpui::point(r.center().x, r.bottom() + gpui::px(60.)));
+    assert_eq!(sel_count(&b, cx), 0);
+    assert!(!menu_open(&b, cx));
+}
+
+#[gpui::test]
+fn context_menu_item_runs_action(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    let r = cx.debug_bounds("row-1").unwrap();
+    right_click(cx, r.center());
+    let item = cx.debug_bounds("ctx-copy-path").expect("menu item rendered");
+    cx.simulate_click(item.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!menu_open(&b, cx));
+    assert_eq!(clipboard_text(cx), Some(t.path().join("b.txt").display().to_string()));
+}
+
+#[gpui::test]
+fn context_menu_reveal_uses_opener(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_rec(cx, t.path(), &rec);
+    let r = cx.debug_bounds("row-0").unwrap();
+    right_click(cx, r.center());
+    let item = cx.debug_bounds("ctx-reveal").expect("menu item rendered");
+    cx.simulate_click(item.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(*rec.revealed.borrow(), [vec![t.path().join("a.txt")]]);
+}
