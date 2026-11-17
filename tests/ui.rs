@@ -1545,3 +1545,36 @@ fn corrupt_state_renamed_and_tempdir_defaults(cx: &mut TestAppContext) {
     assert!(files[0].starts_with("state.json.corrupt-"));
     assert_eq!(fs::read(state.path().join(&files[0])).unwrap(), b"{ definitely not json");
 }
+
+// ---- Phase 5: asynchronous column view -------------------------------------------------------
+
+fn preview_names(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+    cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().expect("column view").read(cx).preview_names())
+}
+
+#[gpui::test]
+fn column_view_async_preview(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    nested(t.path());
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    // Selecting a folder shows its columns at once, but the entries come from a background read.
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    assert_eq!(preview_names(&b, cx), None);
+    cx.run_until_parked();
+    assert_eq!(preview_names(&b, cx), Some(vec!["deep".to_string(), "f.txt".to_string()]));
+}
+
+#[gpui::test]
+fn column_drill_before_preview_loaded_selects_first(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    nested(t.path());
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2");
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::SelectNext), cx));
+    cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("sub"));
+    assert_eq!(selected(&b, 1, cx), Some("deep".into()));
+    assert_eq!(preview_names(&b, cx), Some(vec!["x.txt".to_string()]));
+}
