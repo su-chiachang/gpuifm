@@ -11,6 +11,147 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// The well-known folders the Go menu jumps to. Tests root them in a tempdir.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Places {
+    pub home: PathBuf,
+    pub desktop: PathBuf,
+    pub documents: PathBuf,
+    pub downloads: PathBuf,
+    pub applications: PathBuf,
+}
+
+impl Places {
+    pub fn system() -> Self {
+        let home = home_dir();
+        Self {
+            desktop: home.join("Desktop"),
+            documents: home.join("Documents"),
+            downloads: home.join("Downloads"),
+            applications: PathBuf::from("/Applications"),
+            home,
+        }
+    }
+
+    /// Everything under `home` (applications is `home/Applications`): for tests.
+    pub fn rooted(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        Self {
+            desktop: home.join("Desktop"),
+            documents: home.join("Documents"),
+            downloads: home.join("Downloads"),
+            applications: home.join("Applications"),
+            home,
+        }
+    }
+}
+
+impl Default for Places {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+/// Lexical normalization: drops `.` and trailing slashes, resolves `..` (never above the root).
+/// Does not touch the disk.
+pub fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if out.as_os_str().is_empty() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() { PathBuf::from(".") } else { out }
+}
+
+/// Expands only `~` and `~/...`; `~user` and everything else is returned untouched.
+pub fn expand_tilde(text: &str, home: &Path) -> String {
+    if text == "~" {
+        home.display().to_string()
+    } else if let Some(rest) = text.strip_prefix("~/") {
+        home.join(rest).display().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// `~` / `~/sub` for paths inside `home`, else the plain path.
+pub fn abbreviate(p: &Path, home: &Path) -> String {
+    if home == Path::new("/") {
+        return p.display().to_string();
+    }
+    match p.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GoTarget {
+    Empty,
+    Folder(PathBuf),
+    File { dir: PathBuf, select: PathBuf },
+    NotFound,
+}
+
+/// Interprets Go to Folder input: trimmed, `~` expanded, relative paths resolved against `cwd`,
+/// normalized lexically, then checked on disk.
+pub fn resolve_go_to(text: &str, home: &Path, cwd: &Path) -> GoTarget {
+    let t = text.trim();
+    if t.is_empty() {
+        return GoTarget::Empty;
+    }
+    let expanded = expand_tilde(t, home);
+    let p = Path::new(&expanded);
+    let full = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let path = normalize(&full);
+    if path.is_dir() {
+        GoTarget::Folder(path)
+    } else if path.exists() {
+        match path.parent() {
+            Some(dir) => GoTarget::File { dir: dir.to_path_buf(), select: path },
+            None => GoTarget::NotFound,
+        }
+    } else {
+        GoTarget::NotFound
+    }
+}
+
+/// Breadcrumb folders from `home` (when `dir` is inside it) or `/` down to `dir`.
+pub fn crumbs(dir: &Path, home: &Path) -> Vec<PathBuf> {
+    let (root, rest) = match dir.strip_prefix(home) {
+        Ok(rest) if home != Path::new("/") => (home.to_path_buf(), rest.to_path_buf()),
+        _ => (PathBuf::from("/"), dir.strip_prefix("/").unwrap_or(dir).to_path_buf()),
+    };
+    let mut out = vec![root.clone()];
+    let mut cur = root;
+    for c in rest.components() {
+        cur.push(c.as_os_str());
+        out.push(cur.clone());
+    }
+    out
+}
+
+pub fn crumb_title(p: &Path, home: &Path) -> String {
+    if p == Path::new("/") {
+        "Macintosh HD".into()
+    } else if p == home {
+        "Home".into()
+    } else {
+        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
+    }
+}
+
 /// Swift defaults: Desktop, Documents, Downloads, Home (not filtered by existence).
 pub fn default_favorites(home: &Path) -> Vec<SidebarEntry> {
     let mut v: Vec<SidebarEntry> = ["Desktop", "Documents", "Downloads"]
@@ -115,5 +256,81 @@ mod tests {
         add_favorite(&mut l, &a);
         let names: Vec<_> = l.iter().map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["b", "a"]);
+    }
+
+    #[test]
+    fn tilde_forms() {
+        let h = Path::new("/h");
+        assert_eq!(expand_tilde("~", h), "/h");
+        assert_eq!(expand_tilde("~/a/b", h), "/h/a/b");
+        assert_eq!(expand_tilde("~/", h), "/h/");
+        assert_eq!(expand_tilde("~bob/x", h), "~bob/x");
+        assert_eq!(expand_tilde("/x/~", h), "/x/~");
+        assert_eq!(expand_tilde("a~", h), "a~");
+    }
+
+    #[test]
+    fn normalize_lexical() {
+        assert_eq!(normalize(Path::new("/a/b/../c/./d/")), PathBuf::from("/a/c/d"));
+        assert_eq!(normalize(Path::new("/../..")), PathBuf::from("/"));
+        assert_eq!(normalize(Path::new("/a/..")), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn abbreviate_home() {
+        let h = Path::new("/h");
+        assert_eq!(abbreviate(Path::new("/h"), h), "~");
+        assert_eq!(abbreviate(Path::new("/h/a/b"), h), "~/a/b");
+        assert_eq!(abbreviate(Path::new("/hx/a"), h), "/hx/a");
+        assert_eq!(abbreviate(Path::new("/usr"), h), "/usr");
+    }
+
+    #[test]
+    fn resolve_outcomes() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        fs::create_dir_all(home.join("sub").join("deep")).unwrap();
+        fs::write(home.join("sub").join("f.txt"), "x").unwrap();
+        assert_eq!(resolve_go_to("   ", home, home), GoTarget::Empty);
+        assert_eq!(resolve_go_to("~", home, home), GoTarget::Folder(home.to_path_buf()));
+        assert_eq!(resolve_go_to("  ~/sub/ ", home, home), GoTarget::Folder(home.join("sub")));
+        assert_eq!(resolve_go_to("~/sub/deep/..", home, home), GoTarget::Folder(home.join("sub")));
+        assert_eq!(
+            resolve_go_to("~/sub/f.txt", home, home),
+            GoTarget::File { dir: home.join("sub"), select: home.join("sub").join("f.txt") }
+        );
+        assert_eq!(resolve_go_to("~/nope", home, home), GoTarget::NotFound);
+        assert_eq!(resolve_go_to("~nobody/x", home, home), GoTarget::NotFound);
+        // relative input resolves against the current folder
+        assert_eq!(resolve_go_to("deep", home, &home.join("sub")), GoTarget::Folder(home.join("sub").join("deep")));
+        let abs = home.join("sub").display().to_string();
+        assert_eq!(resolve_go_to(&abs, Path::new("/elsewhere"), home), GoTarget::Folder(home.join("sub")));
+    }
+
+    #[test]
+    fn crumbs_inside_outside_root() {
+        let h = Path::new("/Users/me");
+        assert_eq!(crumbs(Path::new("/Users/me"), h), [PathBuf::from("/Users/me")]);
+        assert_eq!(
+            crumbs(Path::new("/Users/me/a/b"), h),
+            [PathBuf::from("/Users/me"), PathBuf::from("/Users/me/a"), PathBuf::from("/Users/me/a/b")]
+        );
+        assert_eq!(
+            crumbs(Path::new("/usr/bin"), h),
+            [PathBuf::from("/"), PathBuf::from("/usr"), PathBuf::from("/usr/bin")]
+        );
+        assert_eq!(crumbs(Path::new("/"), h), [PathBuf::from("/")]);
+        // a sibling that merely shares the prefix is outside home
+        assert_eq!(crumbs(Path::new("/Users/me2"), h)[0], PathBuf::from("/"));
+        assert_eq!(crumb_title(Path::new("/"), h), "Macintosh HD");
+        assert_eq!(crumb_title(h, h), "Home");
+        assert_eq!(crumb_title(Path::new("/Users/me/a"), h), "a");
+    }
+
+    #[test]
+    fn rooted_places() {
+        let p = Places::rooted("/r");
+        assert_eq!(p.downloads, Path::new("/r/Downloads"));
+        assert_eq!(p.applications, Path::new("/r/Applications"));
     }
 }
