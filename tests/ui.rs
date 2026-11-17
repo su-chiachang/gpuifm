@@ -1670,6 +1670,18 @@ fn deep_path_keeps_last_crumb_visible(cx: &mut TestAppContext) {
     assert!(last.left() >= pane.left() && last.right() <= pane.right(), "last crumb {last:?} outside pane {pane:?}");
 }
 
+#[gpui::test]
+fn escape_closes_context_menu(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    let r = cx.debug_bounds("row-1").unwrap();
+    right_click(cx, r.center());
+    assert!(menu_open(&b, cx));
+    keys(cx, "escape");
+    assert!(!menu_open(&b, cx));
+    assert_eq!(selected(&b, 1, cx), Some("b.txt".into()));
+}
+
 fn select_first_pending(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
     cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().expect("column view").read(cx).select_first_pending())
 }

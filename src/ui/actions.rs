@@ -57,6 +57,7 @@ actions!(
         ToggleSidebar,
         OpenInNewTab,
         OpenInSplit,
+        CloseMenu,
         Quit
     ]
 );

@@ -903,6 +903,7 @@ impl Render for FileList {
             .into_any_element()
         };
 
+        let menu_open = self.menu.is_some();
         let menu = self.menu.map(|pos| {
             let single = self.selection.count() == 1;
             let m = div()
@@ -938,7 +939,12 @@ impl Render for FileList {
         });
 
         div()
-            .key_context(if compact { "FileList compact" } else { "FileList" })
+            .key_context(match (compact, menu_open) {
+                (false, false) => "FileList",
+                (true, false) => "FileList compact",
+                (false, true) => "FileList menu",
+                (true, true) => "FileList compact menu",
+            })
             .track_focus(&self.focus)
             .on_mouse_down(
                 MouseButton::Right,
@@ -956,6 +962,10 @@ impl Render for FileList {
                     cx.notify();
                 }),
             )
+            .on_action(cx.listener(|this, _: &CloseMenu, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ColumnLeft, _, cx| {
                 if this.can_act() {
                     cx.emit(FileListEvent::ColumnLeft);

@@ -50,6 +50,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-y", QuickLook, Some("FileList")),
         KeyBinding::new("left", ColumnLeft, Some("FileList && compact")),
         KeyBinding::new("right", ColumnRight, Some("FileList && compact")),
+        KeyBinding::new("escape", CloseMenu, Some("FileList && menu")),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     crate::ui::text_input::bind_keys(cx);
