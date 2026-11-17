@@ -43,6 +43,7 @@ fn main() {
                     index_roots: None,
                     opener: Rc::new(SystemOpener::default()),
                     watch: true,
+                    places: nanofm::fm_core::places::Places::system(),
                 };
                 cx.new(|cx| Browser::with_options(opts, window, cx))
             },

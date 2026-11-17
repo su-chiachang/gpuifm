@@ -1,5 +1,5 @@
 use crate::fm_core::layout::{Axis, LayoutTree, PaneId, Side, focus_after_close};
-use crate::fm_core::places::{self, home_dir};
+use crate::fm_core::places::{self, Places};
 use crate::fm_core::search_index::{self, IndexEntry};
 use crate::fm_core::sort::SortOrder;
 use crate::fm_core::watch::{DirWatcher, canon};
@@ -42,11 +42,20 @@ pub struct BrowserOptions {
     pub opener: Rc<dyn Opener>,
     /// Watch the open tabs' folders for outside changes (tests drive `dirs_changed` instead).
     pub watch: bool,
+    /// Home and the Go menu's folders; tests root them in a tempdir.
+    pub places: Places,
 }
 
 impl Default for BrowserOptions {
     fn default() -> Self {
-        Self { start: None, store: None, index_roots: None, opener: Rc::new(SystemOpener::default()), watch: false }
+        Self {
+            start: None,
+            store: None,
+            index_roots: None,
+            opener: Rc::new(SystemOpener::default()),
+            watch: false,
+            places: Places::system(),
+        }
     }
 }
 
@@ -81,6 +90,7 @@ pub struct Browser {
     favorites: Vec<SidebarEntry>,
     pinned: Vec<SidebarEntry>,
     opener: Rc<dyn Opener>,
+    places: Places,
     store: Option<StateStore>,
     last_saved: Option<PersistedState>,
     save_gen: u64,
@@ -108,8 +118,8 @@ impl Browser {
     }
 
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let BrowserOptions { start, store, index_roots, opener, watch } = opts;
-        let loaded = store.as_ref().map(|s| s.load());
+        let BrowserOptions { start, store, index_roots, opener, watch, places } = opts;
+        let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
         let (favorites, pinned, show_hidden) = match &loaded {
             Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden),
             None => (Vec::new(), Vec::new(), false),
@@ -119,7 +129,7 @@ impl Browser {
             _ => None,
         };
         let tree = restored.unwrap_or_else(|| {
-            LayoutTree::Leaf(PaneSnapshot { tabs: vec![start.clone().unwrap_or_else(home_dir)], ..Default::default() })
+            LayoutTree::Leaf(PaneSnapshot { tabs: vec![start.clone().unwrap_or_else(|| places.home.clone())], ..Default::default() })
         });
         let mut next = 1u64;
         let layout = tree.map(&mut |_| {
@@ -131,10 +141,10 @@ impl Browser {
         let first = PaneId(1);
         let first_dir = {
             let s = &snaps[0];
-            s.tabs.get(s.active).cloned().unwrap_or_else(home_dir)
+            s.tabs.get(s.active).cloned().unwrap_or_else(|| places.home.clone())
         };
 
-        let sidebar = cx.new(|_| Sidebar::new(first_dir, favorites.clone(), pinned.clone()));
+        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone()));
         let ops = cx.new(|_| FileOps::new());
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(
@@ -184,6 +194,7 @@ impl Browser {
             favorites,
             pinned,
             opener,
+            places,
             store,
             last_saved: loaded,
             save_gen: 0,
@@ -284,7 +295,7 @@ impl Browser {
 
     fn create_pane(&mut self, id: PaneId, snap: PaneSnapshot, sort: SortOrder, window: &mut Window, cx: &mut Context<Self>) {
         let (ops, opener, hidden) = (self.ops.clone(), self.opener.clone(), self.show_hidden);
-        let first = snap.tabs.first().cloned().unwrap_or_else(home_dir);
+        let first = snap.tabs.first().cloned().unwrap_or_else(|| self.places.home.clone());
         let pane = cx.new(|cx| {
             let mut p = Pane::new(id, first, ops, opener, hidden, sort, snap.view_mode, cx);
             p.restore_tabs(&snap, cx);
@@ -653,7 +664,7 @@ impl Browser {
             None => {
                 let f: Vec<PathBuf> = self.favorites.iter().map(|e| e.path.clone()).collect();
                 let p: Vec<PathBuf> = self.pinned.iter().map(|e| e.path.clone()).collect();
-                search_index::index_roots(&home_dir(), &f, &p)
+                search_index::index_roots(&self.places.home, &f, &p)
             }
         };
         self.index_gen += 1;
