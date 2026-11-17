@@ -775,6 +775,15 @@ impl Browser {
         }
     }
 
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        let list = self.active_list(cx);
+        if list.read(cx).is_renaming() {
+            return;
+        }
+        let targets = list.read(cx).action_targets();
+        self.opener.reveal(&targets);
+    }
+
     // ---- Go menu -------------------------------------------------------------------------------
 
     /// Go to Home / Desktop / ...: the folder must exist.
@@ -1034,6 +1043,7 @@ impl Render for Browser {
                 this.go_place(this.places.applications.clone(), window, cx)
             }))
             .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
+            .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.focused_pane().clone().update(cx, |p, cx| p.new_tab(cx));

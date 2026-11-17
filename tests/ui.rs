@@ -1270,3 +1270,80 @@ fn go_to_escape_closes_and_toggles(cx: &mut TestAppContext) {
     keys(cx, "cmd-shift-g");
     assert!(!goto_open(&b, cx));
 }
+
+// ---- Phase 5: Copy Path and Reveal ---------------------------------------------------------
+
+/// Fake opener: records reveals (never spawns `open -R`) and opens.
+#[derive(Clone, Default)]
+struct RevealRecorder {
+    revealed: Rc<RefCell<Vec<Vec<PathBuf>>>>,
+    opened: Rc<RefCell<Vec<PathBuf>>>,
+}
+
+impl Opener for RevealRecorder {
+    fn open(&self, _cx: &mut gpui::App, path: &Path) {
+        self.opened.borrow_mut().push(path.to_path_buf());
+    }
+    fn reveal(&self, paths: &[PathBuf]) {
+        self.revealed.borrow_mut().push(paths.to_vec());
+    }
+}
+
+fn mount_rec<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &Path,
+    rec: &RevealRecorder,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, op, home) = (dir.to_path_buf(), rec.clone(), dir.to_path_buf());
+    mount_opts(cx, move || BrowserOptions {
+        start: Some(start),
+        opener: Rc::new(op),
+        places: Places::rooted(home),
+        ..Default::default()
+    })
+}
+
+fn clipboard_text(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+}
+
+#[gpui::test]
+fn alt_cmd_c_copies_selection_newline_joined(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (_b, cx) = mount(cx, t.path());
+    keys(cx, "down shift-down");
+    keys(cx, "alt-cmd-c");
+    let want = format!("{}\n{}", t.path().join("a.txt").display(), t.path().join("b.txt").display());
+    assert_eq!(clipboard_text(cx), Some(want));
+}
+
+#[gpui::test]
+fn alt_cmd_c_no_selection_copies_folder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (_b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-c");
+    assert_eq!(clipboard_text(cx), Some(t.path().display().to_string()));
+}
+
+#[gpui::test]
+fn alt_cmd_c_in_rename_types_nothing(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    keys(cx, "alt-cmd-c");
+    assert_eq!(clipboard_text(cx), None);
+    assert_eq!(renaming(&b, cx), Some(("a.txt".into(), 0..1)));
+}
+
+#[gpui::test]
+fn reveal_records_selection_or_folder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_rec(cx, t.path(), &rec);
+    cx.dispatch_action(nanofm::ui::actions::RevealInFinder);
+    cx.run_until_parked();
+    keys(cx, "down");
+    cx.dispatch_action(nanofm::ui::actions::RevealInFinder);
+    cx.run_until_parked();
+    assert_eq!(*rec.revealed.borrow(), [vec![t.path().to_path_buf()], vec![t.path().join("a.txt")]]);
+}

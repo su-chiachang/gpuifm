@@ -12,7 +12,7 @@ use crate::ui::opener::Opener;
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
-    ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
+    ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
     ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
     uniform_list,
 };
@@ -186,6 +186,21 @@ impl FileList {
     /// Paths of the selected entries.
     pub fn selection_paths(&self) -> Vec<PathBuf> {
         self.selected_paths()
+    }
+
+    /// Entries on screen (after the filter).
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn selection_count(&self) -> usize {
+        self.selection.count()
+    }
+
+    /// What path-based commands act on: the selection, or the current folder when nothing is selected.
+    pub fn action_targets(&self) -> Vec<PathBuf> {
+        let sel = self.selected_paths();
+        if sel.is_empty() { vec![self.history.current().to_path_buf()] } else { sel }
     }
 
     /// The selected entry when it is the only one and a folder.
@@ -528,6 +543,16 @@ impl FileList {
         self.ops.update(cx, |o, cx| o.set_clipboard(paths, cx));
     }
 
+    /// Puts the target paths (newline-joined) on the system clipboard; the internal file
+    /// clipboard used by Copy / Paste is left alone.
+    pub fn on_copy_path(&mut self, cx: &mut Context<Self>) {
+        if !self.can_act() {
+            return;
+        }
+        let text = self.action_targets().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     pub fn on_paste(&mut self, move_items: bool, cx: &mut Context<Self>) {
         if !self.can_act() {
             return;
@@ -840,6 +865,7 @@ impl Render for FileList {
             .on_action(cx.listener(|this, _: &OpenSelected, window, cx| this.on_open(window, cx)))
             .on_action(cx.listener(|this, _: &BeginRename, window, cx| this.begin_rename(window, cx)))
             .on_action(cx.listener(|this, _: &CopyItems, _, cx| this.on_copy(cx)))
+            .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.on_copy_path(cx)))
             .on_action(cx.listener(|this, _: &PasteItems, _, cx| this.on_paste(false, cx)))
             .on_action(cx.listener(|this, _: &PasteMove, _, cx| this.on_paste(true, cx)))
             .on_action(cx.listener(|this, _: &Duplicate, _, cx| this.on_duplicate(cx)))
