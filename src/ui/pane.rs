@@ -319,7 +319,9 @@ impl Pane {
             .border_t_1()
             .border_color(rgb(theme::BORDER))
             .text_xs();
-        let mut crumbs_row = div().flex().flex_1().min_w_0().items_center().gap_1().overflow_hidden();
+        // justify_end: when the trail is too long it overflows (and is clipped) on the left, so the
+        // current folder's crumb stays visible.
+        let mut crumbs_row = div().flex().flex_1().min_w_0().items_center().justify_end().gap_1().overflow_hidden();
         for (i, p) in trail.into_iter().enumerate() {
             if i > 0 {
                 crumbs_row = crumbs_row.child(div().flex_none().text_color(rgb(theme::TEXT_DIM)).child("\u{203A}"));

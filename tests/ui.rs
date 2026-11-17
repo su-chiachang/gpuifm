@@ -1654,3 +1654,18 @@ fn context_menu_reveal_uses_opener(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*rec.revealed.borrow(), [vec![t.path().join("a.txt")]]);
 }
+
+#[gpui::test]
+fn deep_path_keeps_last_crumb_visible(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let deep = t.path().join("alpha_long_name").join("bravo_long_name").join("charlie_long_name").join("delta_long_name").join("current_folder");
+    fs::create_dir_all(&deep).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &deep);
+    cx.simulate_resize(gpui::size(gpui::px(640.), gpui::px(300.)));
+    cx.run_until_parked();
+    let n = crumb_titles(&b, cx).len();
+    assert_eq!(n, 6);
+    let pane = cx.debug_bounds("pane-1").expect("pane");
+    let last = cx.debug_bounds("crumb-1-5").expect("last crumb");
+    assert!(last.left() >= pane.left() && last.right() <= pane.right(), "last crumb {last:?} outside pane {pane:?}");
+}
