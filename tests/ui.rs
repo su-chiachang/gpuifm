@@ -1347,3 +1347,61 @@ fn reveal_records_selection_or_folder(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*rec.revealed.borrow(), [vec![t.path().to_path_buf()], vec![t.path().join("a.txt")]]);
 }
+
+// ---- Phase 5: sidebar toggle ---------------------------------------------------------------
+
+fn sidebar_visible(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).sidebar_visible())
+}
+
+#[gpui::test]
+fn ctrl_cmd_s_toggles_and_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[t.path()], 0));
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert!(sidebar_visible(&b, cx));
+    keys(cx, "ctrl-cmd-s");
+    assert!(!sidebar_visible(&b, cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(!StateStore::new(state.path()).load().sidebar_visible);
+    keys(cx, "ctrl-cmd-s");
+    assert!(sidebar_visible(&b, cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(StateStore::new(state.path()).load().sidebar_visible);
+}
+
+#[gpui::test]
+fn sidebar_hidden_state_restored(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let mut s = StateStore::new(state.path()).load_with_home(t.path());
+    s.layout = leaf_snap(&[t.path()], 0);
+    s.sidebar_visible = false;
+    StateStore::new(state.path()).save(&s).unwrap();
+    let (dir, home) = (state.path().to_path_buf(), t.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert!(!sidebar_visible(&b, cx));
+}
+
+#[gpui::test]
+fn go_to_typing_ctrl_cmd_s_ignored(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    keys(cx, "ctrl-cmd-s");
+    assert!(sidebar_visible(&b, cx));
+    assert!(goto_open(&b, cx));
+    assert_eq!(goto_text(&b, cx), Some("~".into()));
+}

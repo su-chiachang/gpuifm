@@ -88,6 +88,7 @@ pub struct Browser {
     focused: PaneId,
     next_pane_id: u64,
     show_hidden: bool,
+    sidebar_visible: bool,
     title: String,
     banner: Option<(u64, String)>,
     banner_id: u64,
@@ -127,9 +128,9 @@ impl Browser {
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let BrowserOptions { start, store, index_roots, opener, watch, places } = opts;
         let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
-        let (favorites, pinned, show_hidden) = match &loaded {
-            Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden),
-            None => (Vec::new(), Vec::new(), false),
+        let (favorites, pinned, show_hidden, sidebar_visible) = match &loaded {
+            Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden, l.sidebar_visible),
+            None => (Vec::new(), Vec::new(), false, true),
         };
         let restored = match (&start, &loaded) {
             (None, Some(l)) => restore(l, |p| p.is_dir()),
@@ -194,6 +195,7 @@ impl Browser {
             focused: first,
             next_pane_id: next,
             show_hidden,
+            sidebar_visible,
             title: String::new(),
             banner: None,
             banner_id: 0,
@@ -247,6 +249,9 @@ impl Browser {
             })
             .detach();
         }
+        if !sidebar_visible {
+            this.rebuild_menus(cx);
+        }
         // Keys only fire when something focused is in the dispatch path.
         this.focus_pane(first, window, cx);
         this
@@ -295,6 +300,10 @@ impl Browser {
     /// The Go to Folder field while the overlay is open.
     pub fn go_to_input(&self) -> Option<&Entity<TextInput>> {
         self.goto.as_ref().map(|(i, _)| i)
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&Entity<Pane>> {
@@ -459,7 +468,7 @@ impl Browser {
             let o = self.ops.read(cx);
             (o.undo_title(), o.redo_title())
         };
-        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: true });
+        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible });
     }
 
     fn show_banner(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -602,7 +611,7 @@ impl Browser {
             pinned: self.pinned.clone(),
             layout: self.layout.map(&mut |id| self.panes[id].read(cx).snapshot(cx)),
             show_hidden: self.show_hidden,
-            sidebar_visible: true,
+            sidebar_visible: self.sidebar_visible,
         }
     }
 
@@ -773,6 +782,13 @@ impl Browser {
                 cx.defer_in(window, move |_, window, cx| window.dispatch_action(action, cx));
             }
         }
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        self.rebuild_menus(cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn reveal(&mut self, cx: &mut Context<Self>) {
@@ -1043,6 +1059,7 @@ impl Render for Browser {
                 this.go_place(this.places.applications.clone(), window, cx)
             }))
             .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
@@ -1087,7 +1104,7 @@ impl Render for Browser {
             .size_full()
             .flex()
             .bg(rgb(theme::BG))
-            .child(self.sidebar.clone())
+            .when(self.sidebar_visible, |d| d.child(self.sidebar.clone()))
             .child(
                 div()
                     .flex()
