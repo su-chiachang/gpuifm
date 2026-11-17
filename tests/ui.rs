@@ -1,6 +1,7 @@
 //! Headless end-to-end UI tests: the real Browser, the real keymap, real keystrokes, tempdirs only.
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use nanofm::fm_core::places::Places;
 use nanofm::fm_core::layout::{Axis, LayoutTree, PaneId};
 use nanofm::fm_core::sys::TrashCleanup;
 use nanofm::fm_core::sort::SortKey;
@@ -1117,4 +1118,155 @@ fn column_rows_have_layout(cx: &mut TestAppContext) {
     keys(cx, "cmd-2");
     let r = cx.debug_bounds("row-0").expect("row-0 laid out in column mode");
     assert!(r.size.height > gpui::px(0.));
+}
+
+// ---- Phase 5: Go menu ----------------------------------------------------------------------
+
+/// Browser at `start` whose home (and Desktop, Downloads, ...) live under `home`: never real folders.
+fn mount_home<'a>(
+    cx: &'a mut TestAppContext,
+    home: &Path,
+    start: &Path,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (home, start) = (home.to_path_buf(), start.to_path_buf());
+    mount_opts(cx, move || BrowserOptions { start: Some(start), places: Places::rooted(home), ..Default::default() })
+}
+
+fn banner_of(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| b.read(cx).banner().map(str::to_string))
+}
+
+fn goto_open(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).go_to_input().is_some())
+}
+
+fn goto_text(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read(|cx| b.read(cx).go_to_input().map(|i| i.read(cx).text().to_string()))
+}
+
+#[gpui::test]
+fn shift_cmd_h_goes_home(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("a")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-h");
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn alt_cmd_l_downloads(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("Downloads")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "alt-cmd-l");
+    assert_eq!(dir_of(&b, cx), t.path().join("Downloads"));
+}
+
+#[gpui::test]
+fn go_desktop_via_dispatch_action(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("Desktop")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    cx.dispatch_action(nanofm::ui::actions::GoDesktop);
+    cx.run_until_parked();
+    assert_eq!(dir_of(&b, cx), t.path().join("Desktop"));
+}
+
+#[gpui::test]
+fn missing_place_shows_banner(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-a");
+    assert_eq!(dir_of(&b, cx), t.path());
+    let want = format!("The folder \u{201C}{}\u{201D} can\u{2019}t be found.", t.path().join("Applications").display());
+    assert_eq!(banner_of(&b, cx), Some(want));
+}
+
+#[gpui::test]
+fn shift_cmd_g_folder(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a")).unwrap();
+    fs::create_dir_all(t.path().join("b")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-g");
+    assert_eq!(goto_text(&b, cx), Some("~/a".into()));
+    let sel = cx.read(|cx| b.read(cx).go_to_input().unwrap().read(cx).selected_range());
+    assert_eq!(sel, 0..3);
+    cx.simulate_input("../b");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert!(!goto_open(&b, cx));
+    // relative input resolves against the current folder
+    assert_eq!(dir_of(&b, cx), t.path().join("b"));
+}
+
+#[gpui::test]
+fn shift_cmd_g_file_selects_in_parent(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("sub")).unwrap();
+    fs::write(t.path().join("sub").join("f.txt"), "x").unwrap();
+    fs::write(t.path().join("sub").join("g.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("~/sub/g.txt");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path().join("sub"));
+    assert_eq!(selected(&b, 1, cx), Some("g.txt".into()));
+}
+
+#[gpui::test]
+fn shift_cmd_g_tilde(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join("a")).unwrap();
+    let (b, cx) = mount_home(cx, t.path(), &t.path().join("a"));
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("  ~  ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn shift_cmd_g_missing_banner_exact_text(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input(" ~/nope ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert_eq!(dir_of(&b, cx), t.path());
+    assert_eq!(banner_of(&b, cx), Some("The folder \u{201C} ~/nope \u{201D} can\u{2019}t be found.".into()));
+}
+
+#[gpui::test]
+fn shift_cmd_g_empty_does_nothing(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    cx.simulate_input("   ");
+    cx.run_until_parked();
+    keys(cx, "enter");
+    assert!(!goto_open(&b, cx));
+    assert_eq!(banner_of(&b, cx), None);
+    assert_eq!(dir_of(&b, cx), t.path());
+}
+
+#[gpui::test]
+fn go_to_escape_closes_and_toggles(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("a.txt"), "x").unwrap();
+    let (b, cx) = mount_home(cx, t.path(), t.path());
+    keys(cx, "cmd-shift-g");
+    assert!(goto_open(&b, cx));
+    keys(cx, "escape");
+    assert!(!goto_open(&b, cx));
+    // focus is back in the list
+    keys(cx, "down");
+    assert_eq!(selected(&b, 1, cx), Some("a.txt".into()));
+    // the shortcut toggles, also from inside the field
+    keys(cx, "cmd-shift-g");
+    assert!(goto_open(&b, cx));
+    keys(cx, "cmd-shift-g");
+    assert!(!goto_open(&b, cx));
 }

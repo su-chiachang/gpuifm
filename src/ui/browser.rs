@@ -1,5 +1,5 @@
 use crate::fm_core::layout::{Axis, LayoutTree, PaneId, Side, focus_after_close};
-use crate::fm_core::places::{self, Places};
+use crate::fm_core::places::{self, GoTarget, Places};
 use crate::fm_core::search_index::{self, IndexEntry};
 use crate::fm_core::sort::SortOrder;
 use crate::fm_core::watch::{DirWatcher, canon};
@@ -13,6 +13,7 @@ use crate::ui::ops::{FileOps, FileOpsEvent};
 use crate::ui::palette::{Choice, OpenMode, Palette, PaletteEvent};
 use crate::ui::pane::{Pane, PaneEvent};
 use crate::ui::sidebar::{Group, Sidebar, SidebarEvent};
+use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription,
@@ -59,6 +60,10 @@ impl Default for BrowserOptions {
     }
 }
 
+fn not_found(raw: &str) -> String {
+    format!("The folder \u{201C}{raw}\u{201D} can\u{2019}t be found.")
+}
+
 /// Drag payload for a split divider: which split (by child-index path) and which divider in it.
 #[derive(Clone)]
 struct DraggedDivider {
@@ -102,6 +107,8 @@ pub struct Browser {
     index_gen: u64,
     _index_task: Option<Task<()>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    goto: Option<(Entity<TextInput>, Vec<Subscription>)>,
+    goto_focus_pending: bool,
     ql_paths: Vec<PathBuf>,
     watcher: Option<DirWatcher>,
     dirty: BTreeSet<PathBuf>,
@@ -206,6 +213,8 @@ impl Browser {
             index_gen: 0,
             _index_task: None,
             palette: None,
+            goto: None,
+            goto_focus_pending: false,
             ql_paths: Vec::new(),
             watcher: None,
             dirty: BTreeSet::new(),
@@ -281,6 +290,11 @@ impl Browser {
 
     pub fn palette(&self) -> Option<&Entity<Palette>> {
         self.palette.as_ref().map(|(p, _)| p)
+    }
+
+    /// The Go to Folder field while the overlay is open.
+    pub fn go_to_input(&self) -> Option<&Entity<TextInput>> {
+        self.goto.as_ref().map(|(i, _)| i)
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&Entity<Pane>> {
@@ -761,6 +775,70 @@ impl Browser {
         }
     }
 
+    // ---- Go menu -------------------------------------------------------------------------------
+
+    /// Go to Home / Desktop / ...: the folder must exist.
+    fn go_place(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_list(cx).read(cx).is_renaming() {
+            return;
+        }
+        if path.is_dir() {
+            self.open_location(path, None, OpenMode::Here, window, cx);
+        } else {
+            self.show_banner(not_found(&path.display().to_string()), cx);
+        }
+    }
+
+    fn toggle_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goto.is_some() {
+            self.close_goto(window, cx);
+            return;
+        }
+        if self.active_list(cx).read(cx).is_renaming() {
+            return;
+        }
+        if self.palette.is_some() {
+            self.palette = None;
+        }
+        let cur = self.active_list(cx).read(cx).current_dir().to_path_buf();
+        let text = places::abbreviate(&cur, &self.places.home);
+        let n = text.len();
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new(&text, cx);
+            i.select_range(0..n, cx);
+            i
+        });
+        let subs = vec![cx.subscribe_in(&input, window, |this, input, ev: &TextInputEvent, window, cx| match ev {
+            TextInputEvent::Confirm => {
+                let raw = input.read(cx).text().to_string();
+                this.confirm_goto(raw, window, cx);
+            }
+            TextInputEvent::Cancel => this.close_goto(window, cx),
+        })];
+        self.goto = Some((input, subs));
+        self.goto_focus_pending = true;
+        cx.notify();
+    }
+
+    fn close_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goto.take().is_some() {
+            self.goto_focus_pending = false;
+            self.focus_pane(self.focused, window, cx);
+        }
+    }
+
+    fn confirm_goto(&mut self, raw: String, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active_list(cx).read(cx).current_dir().to_path_buf();
+        let target = places::resolve_go_to(&raw, &self.places.home, &cwd);
+        self.close_goto(window, cx);
+        match target {
+            GoTarget::Empty => {}
+            GoTarget::Folder(dir) => self.open_location(dir, None, OpenMode::Here, window, cx),
+            GoTarget::File { dir, select } => self.open_location(dir, Some(select), OpenMode::Here, window, cx),
+            GoTarget::NotFound => self.show_banner(not_found(&raw), cx),
+        }
+    }
+
     fn render_node(&self, node: &LayoutTree<PaneId>, path: Vec<usize>, cx: &mut Context<Self>) -> AnyElement {
         match node {
             LayoutTree::Leaf(id) => {
@@ -841,7 +919,12 @@ impl Focusable for Browser {
 }
 
 impl Render for Browser {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.goto_focus_pending)
+            && let Some((i, _)) = &self.goto
+        {
+            i.read(cx).focus_handle(cx).focus(window);
+        }
         let (can_undo, can_redo) = {
             let o = self.ops.read(cx);
             (o.can_undo(), o.can_redo())
@@ -891,6 +974,46 @@ impl Render for Browser {
             )
         });
 
+        let goto_overlay = self.goto.as_ref().map(|(input, _)| {
+            deferred(
+                div().absolute().top_0().left_0().size_full().flex().justify_center().pt(px(80.)).child(
+                    div()
+                        .id("goto-overlay")
+                        .key_context("GoTo")
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_goto(window, cx)))
+                        .w(px(480.))
+                        .h_auto()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(theme::TOOLBAR_BG))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_sm()
+                        .text_color(rgb(theme::TEXT))
+                        .child("Go to Folder")
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(theme::ACCENT))
+                                .child(input.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::TEXT_DIM))
+                                .child("Type a folder path; ~ is your home folder. Return to go, Esc to cancel."),
+                        ),
+                ),
+            )
+        });
+
         div()
             .key_context("Browser")
             .track_focus(&self.focus)
@@ -903,6 +1026,14 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &GoForward, _, cx| {
                 this.active_list(cx).update(cx, |l, cx| l.on_forward(cx));
             }))
+            .on_action(cx.listener(|this, _: &GoHome, window, cx| this.go_place(this.places.home.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDesktop, window, cx| this.go_place(this.places.desktop.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDocuments, window, cx| this.go_place(this.places.documents.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoDownloads, window, cx| this.go_place(this.places.downloads.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &GoApplications, window, cx| {
+                this.go_place(this.places.applications.clone(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.focused_pane().clone().update(cx, |p, cx| p.new_tab(cx));
@@ -958,5 +1089,6 @@ impl Render for Browser {
                     .child(div().flex_1().min_h_0().child(panes)),
             )
             .children(overlay)
+            .children(goto_overlay)
     }
 }
