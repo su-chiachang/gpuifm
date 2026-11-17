@@ -241,7 +241,7 @@ impl ColumnView {
                 }
             }
         }
-        self.list.read(cx).focus_handle(cx).focus(window);
+        self.list.read(cx).focus_handle(cx).focus(window, cx);
         if ev.click_count() >= 2 && !entry.is_dir {
             let opener = self.opener.clone();
             opener.open(cx, &entry.path);

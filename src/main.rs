@@ -1,5 +1,5 @@
 use gpui::{
-    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds,
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
 use nanofm::ui::actions::Quit;
@@ -15,10 +15,10 @@ fn main() {
     // State lives in ~/Library/Application Support/nanofm-rs (never the Swift app's `nanofm`);
     // NANOFM_STATE_DIR overrides it (used for smoke tests).
     let state = state_dir(std::env::var_os("NANOFM_STATE_DIR").as_deref(), &home_dir());
-    Application::new().run(|cx: &mut App| {
+    gpui_platform::application().run(|cx: &mut App| {
         nanofm::ui::keymap::bind(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

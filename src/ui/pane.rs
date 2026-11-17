@@ -225,7 +225,7 @@ impl Pane {
         if clear {
             self.clear_filter(cx);
         }
-        self.active_list().read(cx).focus_handle(cx).focus(window);
+        self.active_list().read(cx).focus_handle(cx).focus(window, cx);
     }
 
     pub fn clear_filter(&mut self, cx: &mut Context<Self>) {
@@ -561,7 +561,7 @@ impl Render for Pane {
         if std::mem::take(&mut self.focus_filter_pending)
             && let Some(f) = &self.filter
         {
-            f.input.read(cx).focus_handle(cx).focus(window);
+            f.input.read(cx).focus_handle(cx).focus(window, cx);
         }
         let filter_box = self.filter.as_ref().map(|f| {
             div()

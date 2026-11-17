@@ -26,15 +26,12 @@ pub fn rebuild(cx: &mut App, state: &MenuState) {
         "view.sidebar" => MenuItem::action(if state.sidebar_visible { "Hide Sidebar" } else { "Show Sidebar" }, ToggleSidebar),
         _ => {
             let c = commands::find(id).expect("menu id in command table");
-            MenuItem::Action { name: c.title.into(), action: (c.action)(), os_action: None }
+            MenuItem::Action { name: c.title.into(), action: (c.action)(), os_action: None, checked: false, disabled: false }
         }
     };
-    let menu = |name: &'static str, ids: &[&str]| Menu {
-        name: name.into(),
-        items: ids.iter().map(|id| if id.is_empty() { MenuItem::separator() } else { item(id) }).collect(),
-    };
+    let menu = |name: &'static str, ids: &[&str]| Menu::new(name).items(ids.iter().map(|id| if id.is_empty() { MenuItem::separator() } else { item(id) }));
     cx.set_menus(vec![
-        Menu { name: "nanofm".into(), items: vec![MenuItem::action("Quit nanofm", Quit)] },
+        Menu::new("nanofm").items([MenuItem::action("Quit nanofm", Quit)]),
         menu(
             "File",
             &["tab.new", "tab.close", "pane.close", "", "file.newFolder", "file.open", "file.rename", "file.duplicate", "", "file.openNewTab", "file.openSplit", "", "file.reveal", "file.copyPath", "", "file.pin", "file.addFavorite", "", "file.quickLook", "", "file.trash"],

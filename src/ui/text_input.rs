@@ -4,7 +4,7 @@
 // under the "TextInput" context.
 
 use crate::ui::theme;
-use gpui::{
+use gpui::{TextAlign, 
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, PaintQuad, Pixels, Point,
@@ -471,13 +471,6 @@ struct PrepaintState {
     selection: Option<PaintQuad>,
 }
 
-impl IntoElement for TextElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
 
 impl gpui::Element for TextElement {
     type RequestLayoutState = ();
@@ -594,7 +587,7 @@ impl gpui::Element for TextElement {
             window.paint_quad(selection)
         }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx).unwrap();
+        line.paint(bounds.origin, window.line_height(), TextAlign::Left, None, window, cx).unwrap();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()

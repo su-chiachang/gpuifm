@@ -306,7 +306,7 @@ impl Palette {
 impl Render for Palette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.focus_pending) {
-            self.input.read(cx).focus_handle(cx).focus(window);
+            self.input.read(cx).focus_handle(cx).focus(window, cx);
         }
         let rows: Vec<gpui::AnyElement> =
             self.rows.clone().iter().enumerate().map(|(i, r)| self.row_view(i, r, cx)).collect();

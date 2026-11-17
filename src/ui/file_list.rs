@@ -429,7 +429,7 @@ impl FileList {
 
     /// Moves focus to the list and makes sure something is selected (filter field Down).
     pub fn enter_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         if self.can_act() && self.selection.get().is_none() {
             self.move_selection(1, false, cx);
         }
@@ -646,7 +646,7 @@ impl FileList {
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.rename.take() else { return };
         let new = s.input.read(cx).text().to_string();
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         if new != leaf_of(&s.path) {
             let req = OpRequest::Rename { src: s.path.clone(), name: new };
             let me = cx.entity_id();
@@ -659,7 +659,7 @@ impl FileList {
         if self.rename.take().is_none() {
             return;
         }
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         self.after_rename(cx);
     }
 
@@ -688,7 +688,7 @@ impl FileList {
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.menu = None;
-                this.focus.focus(window);
+                this.focus.focus(window, cx);
                 // Run the ordinary action once the menu is gone and focus is in the list.
                 let a = action();
                 cx.defer_in(window, move |_, window, cx| window.dispatch_action(a, cx));
@@ -736,7 +736,7 @@ impl Render for FileList {
         if self.focus_rename
             && let Some(s) = &self.rename
         {
-            s.input.read(cx).focus_handle(cx).focus(window);
+            s.input.read(cx).focus_handle(cx).focus(window, cx);
             self.focus_rename = false;
         }
 
@@ -830,7 +830,7 @@ impl Render for FileList {
                                             this.selection.set(Some(ix));
                                             cx.emit(FileListEvent::SelectionChanged);
                                         }
-                                        this.focus.focus(window);
+                                        this.focus.focus(window, cx);
                                         this.menu = Some(ev.position);
                                         cx.notify();
                                     }),
@@ -842,11 +842,11 @@ impl Render for FileList {
                                     if let Some(r) = &this.rename {
                                         // Clicks inside the editor belong to it; elsewhere commit via blur.
                                         if r.path != path {
-                                            this.focus.focus(window);
+                                            this.focus.focus(window, cx);
                                         }
                                         return;
                                     }
-                                    this.focus.focus(window);
+                                    this.focus.focus(window, cx);
                                     let m = ev.modifiers();
                                     if m.platform {
                                         this.selection.toggle(ix);
@@ -896,10 +896,10 @@ impl Render for FileList {
                         .collect::<Vec<_>>()
                 }),
             )
-            .track_scroll(self.scroll.clone())
+            .track_scroll(&self.scroll)
             .w_full()
             .min_w_0()
-            .flex_grow()
+            .flex_grow_1()
             .into_any_element()
         };
 
@@ -958,7 +958,7 @@ impl Render for FileList {
                         this.selection.clear();
                         cx.emit(FileListEvent::SelectionChanged);
                     }
-                    this.focus.focus(window);
+                    this.focus.focus(window, cx);
                     cx.notify();
                 }),
             )

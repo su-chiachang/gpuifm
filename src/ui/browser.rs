@@ -396,7 +396,7 @@ impl Browser {
         let list = pane.read(cx).active_list().clone();
         // Re-focusing would blur (and so commit) an in-progress rename.
         if !list.read(cx).is_renaming() {
-            list.read(cx).focus_handle(cx).focus(window);
+            list.read(cx).focus_handle(cx).focus(window, cx);
         }
         self.sync_chrome(window, cx);
         cx.notify();
@@ -974,7 +974,7 @@ impl Render for Browser {
         if std::mem::take(&mut self.goto_focus_pending)
             && let Some((i, _)) = &self.goto
         {
-            i.read(cx).focus_handle(cx).focus(window);
+            i.read(cx).focus_handle(cx).focus(window, cx);
         }
         let (can_undo, can_redo) = {
             let o = self.ops.read(cx);
