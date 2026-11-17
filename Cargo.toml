@@ -1,0 +1,21 @@
+[package]
+name = "nanofm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = "=0.2.2"
+chrono = "0.4"
+unicode-segmentation = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "7"
+futures = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSFileManager", "NSURL", "NSString", "NSError"] }
+
+[dev-dependencies]
+tempfile = "3"
+gpui = { version = "=0.2.2", features = ["test-support"] }
