@@ -6,6 +6,7 @@ use crate::fm_core::watch::{DirWatcher, canon};
 use crate::fm_core::state::{PaneSnapshot, PersistedState, SidebarEntry, StateStore, ViewMode, restore};
 use crate::ui::actions::*;
 use crate::ui::commands;
+use crate::ui::dnd;
 use crate::ui::file_list::FileList;
 use crate::ui::menus;
 use crate::ui::opener::{Opener, SystemOpener};
@@ -152,8 +153,8 @@ impl Browser {
             s.tabs.get(s.active).cloned().unwrap_or_else(|| places.home.clone())
         };
 
-        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone()));
         let ops = cx.new(|_| FileOps::new());
+        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone(), ops.clone()));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(
             &sidebar,
@@ -170,6 +171,26 @@ impl Browser {
                         Group::Pinned => places::remove(&mut this.pinned, *ix),
                     };
                     this.entries_changed(cx);
+                }
+                SidebarEvent::DropFiles { paths, dest, alt, source } => {
+                    dnd::perform(&this.ops, paths, dest, *alt, *source, cx);
+                }
+                SidebarEvent::AddFolders { group, paths } => {
+                    if paths.is_empty() || !paths.iter().all(|p| p.is_dir()) {
+                        return;
+                    }
+                    let list = match group {
+                        Group::Favorites => &mut this.favorites,
+                        Group::Pinned => &mut this.pinned,
+                    };
+                    if places::add_folders(list, paths, *group) {
+                        this.entries_changed(cx);
+                    }
+                }
+                SidebarEvent::Reorder { from, to } => {
+                    if places::move_entry(&mut this.favorites, &mut this.pinned, *from, *to) {
+                        this.entries_changed(cx);
+                    }
                 }
             },
         ));

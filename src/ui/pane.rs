@@ -8,15 +8,17 @@ use crate::fm_core::state::{PaneSnapshot, ViewMode};
 use crate::fm_core::tabs::Tabs;
 use crate::ui::actions::FilterDown;
 use crate::ui::column_view::ColumnView;
+use crate::ui::dnd::DraggedFiles;
 use crate::ui::file_list::{FileList, FileListEvent};
 use crate::ui::opener::Opener;
 use crate::ui::ops::FileOps;
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseDownEvent, Render, Subscription, Window, div, prelude::*, px, rgb,
 };
+use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -310,6 +312,7 @@ impl Pane {
         };
         let pane = self.id.0;
         let trail = crumbs(&dir, &self.home);
+        let list = self.active_list().clone();
         let last = trail.len() - 1;
         let mut bar = div()
             .flex()
@@ -341,6 +344,27 @@ impl Pane {
                     .text_color(rgb(if i == last { theme::TEXT } else { theme::TEXT_DIM }))
                     .hover(|d| d.bg(rgb(theme::HOVER_BG)))
                     .child(title)
+                    .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .can_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |payload: &dyn Any, window: &mut Window, cx: &mut App| {
+                            list.read(cx).accepts_drop(payload, &dest, window.modifiers().alt, cx)
+                        }
+                    })
+                    .on_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |f: &DraggedFiles, window: &mut Window, cx: &mut App| {
+                            let (paths, alt) = (f.paths.clone(), window.modifiers().alt);
+                            list.update(cx, |l, cx| l.drop_files(&paths, &dest, alt, cx));
+                        }
+                    })
+                    .on_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |e: &ExternalPaths, _: &mut Window, cx: &mut App| {
+                            list.update(cx, |l, cx| l.drop_external(e.paths(), &dest, cx));
+                        }
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_list().update(cx, |l, cx| l.navigate(p.clone(), None, cx));
                         cx.emit(PaneEvent::Refocus);

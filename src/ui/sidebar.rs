@@ -1,10 +1,14 @@
+use crate::fm_core::dnd::DragSource;
 use crate::fm_core::places::{Place, list_volumes};
 use crate::fm_core::state::SidebarEntry;
+use crate::ui::dnd::{self, DragPreview, DraggedFiles, DraggedPlace};
+use crate::ui::ops::FileOps;
 use crate::ui::theme;
 use gpui::{
-    Context, EventEmitter, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Window, anchored,
-    deferred, div, prelude::*, px, rgb,
+    App, Context, DragMoveEvent, Entity, EventEmitter, ExternalPaths, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    Point, Render, Window, anchored, deferred, div, prelude::*, px, rgb,
 };
+use std::any::Any;
 use std::path::{Path, PathBuf};
 
 pub use crate::fm_core::places::Section as Group;
@@ -13,6 +17,20 @@ pub enum SidebarEvent {
     Open { path: PathBuf, new_tab: bool },
     OpenSplit { path: PathBuf },
     Remove { group: Group, ix: usize },
+    /// Files dropped onto a sidebar folder: move/copy them into `dest`.
+    DropFiles { paths: Vec<PathBuf>, dest: PathBuf, alt: bool, source: DragSource },
+    /// Folders dropped onto a section heading: add them to that section.
+    AddFolders { group: Group, paths: Vec<PathBuf> },
+    /// A sidebar entry dragged to an insertion slot (index in the destination as it was before the move).
+    Reorder { from: (Group, usize), to: (Group, usize) },
+}
+
+/// Insertion slot of a sidebar reorder drag; `row` is the row whose hover produced it.
+#[derive(Clone, Copy, PartialEq)]
+struct Slot {
+    group: Group,
+    at: usize,
+    row: usize,
 }
 
 struct Menu {
@@ -29,12 +47,20 @@ pub struct Sidebar {
     home: Place,
     active: Option<PathBuf>,
     menu: Option<Menu>,
+    ops: Entity<FileOps>,
+    slot: Option<Slot>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
-    pub fn new(active: PathBuf, home_path: PathBuf, favorites: Vec<SidebarEntry>, pinned: Vec<SidebarEntry>) -> Self {
+    pub fn new(
+        active: PathBuf,
+        home_path: PathBuf,
+        favorites: Vec<SidebarEntry>,
+        pinned: Vec<SidebarEntry>,
+        ops: Entity<FileOps>,
+    ) -> Self {
         let title = home_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -46,6 +72,8 @@ impl Sidebar {
             home: Place { title, path: home_path },
             active: Some(active),
             menu: None,
+            ops,
+            slot: None,
         }
     }
 
@@ -74,7 +102,12 @@ impl Sidebar {
         let menu_path = path.to_path_buf();
         let active = self.active.as_deref() == Some(path);
         let tag = format!("place-{id}-{ix}");
+        let (ops, dest, dest_ext) = (self.ops.clone(), path.to_path_buf(), path.to_path_buf());
+        let is_place = group.is_some();
+        let slot = self.slot.filter(|s| Some(s.group) == group && cx.has_active_drag());
+        let title_for_drag = title.clone();
         div()
+            .relative()
             .id((id, ix))
             .debug_selector(move || tag.clone())
             .px_3()
@@ -85,12 +118,63 @@ impl Sidebar {
             .text_color(rgb(theme::TEXT))
             .when(active, |d| d.bg(rgb(theme::SIDEBAR_ACTIVE_BG)))
             .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+            .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+            .can_drop(move |payload: &dyn Any, window: &mut Window, cx: &mut App| {
+                if payload.is::<DraggedPlace>() {
+                    return is_place;
+                }
+                dnd::accepts(payload, &dest, window.modifiers().alt, ops.read(cx).busy())
+            })
+            .on_drop(cx.listener({
+                let dest = dest_ext.clone();
+                move |_, f: &DraggedFiles, window, cx| {
+                    cx.emit(SidebarEvent::DropFiles {
+                        paths: f.paths.to_vec(),
+                        dest: dest.clone(),
+                        alt: window.modifiers().alt,
+                        source: DragSource::Internal,
+                    });
+                }
+            }))
+            .on_drop(cx.listener(move |_, e: &ExternalPaths, _, cx| {
+                cx.emit(SidebarEvent::DropFiles {
+                    paths: e.paths().to_vec(),
+                    dest: dest_ext.clone(),
+                    alt: false,
+                    source: DragSource::External,
+                });
+            }))
+            .when(slot.is_some_and(|s| s.at == ix), |d| d.child(Self::insertion_line(true)))
+            .when(slot.is_some_and(|s| s.at == ix + 1 && s.at == self.group_len(group)), |d| {
+                d.child(Self::insertion_line(false))
+            })
             .child(title)
             .on_click(cx.listener(move |_, ev: &gpui::ClickEvent, _, cx| {
                 cx.emit(SidebarEvent::Open { path: click_path.clone(), new_tab: ev.modifiers().platform });
             }))
             .when_some(group, |d, group| {
-                d.on_mouse_down(
+                d.on_drag(DraggedPlace { group, ix }, move |_, _, _, cx| cx.new(|_| DragPreview::new(title_for_drag.clone())))
+                    .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedPlace>, _, cx| {
+                        let mine = this.slot.is_some_and(|s| s.row == ix && s.group == group);
+                        if ev.bounds.contains(&ev.event.position) {
+                            let lower = ev.event.position.y > ev.bounds.center().y;
+                            let s = Slot { group, at: ix + usize::from(lower), row: ix };
+                            if this.slot != Some(s) {
+                                this.slot = Some(s);
+                                cx.notify();
+                            }
+                        } else if mine {
+                            this.slot = None;
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop(cx.listener(move |this, p: &DraggedPlace, _, cx| {
+                        let at = this.slot.filter(|s| s.group == group && s.row == ix).map_or(ix, |s| s.at);
+                        this.slot = None;
+                        cx.emit(SidebarEvent::Reorder { from: (p.group, p.ix), to: (group, at) });
+                    }))
+                    .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                         this.menu = Some(Menu { pos: ev.position, group, ix, path: menu_path.clone() });
@@ -100,14 +184,63 @@ impl Sidebar {
             })
     }
 
-    fn heading(title: &'static str) -> impl IntoElement {
-        div()
-            .px_4()
-            .pt_3()
-            .pb_1()
-            .text_xs()
-            .text_color(rgb(theme::TEXT_DIM))
-            .child(title)
+    fn group_len(&self, group: Option<Group>) -> usize {
+        match group {
+            Some(Group::Favorites) => self.favorites.len(),
+            Some(Group::Pinned) => self.pinned.len(),
+            None => usize::MAX,
+        }
+    }
+
+    fn insertion_line(top: bool) -> impl IntoElement {
+        let l = div().absolute().left_0().right_0().h(px(2.)).bg(rgb(theme::ACCENT));
+        if top { l.top_0() } else { l.bottom_0() }
+    }
+
+    fn heading(title: &'static str) -> gpui::Div {
+        div().px_4().pt_3().pb_1().text_xs().text_color(rgb(theme::TEXT_DIM)).child(title)
+    }
+
+    /// A Favorites/Pinned heading: a drop target that adds dropped folders (or appends a dragged entry).
+    fn section_heading(&self, title: &'static str, group: Group, cx: &mut Context<Self>) -> impl IntoElement {
+        let ops = self.ops.clone();
+        let tag = match group {
+            Group::Favorites => "sidebar-heading-favorites",
+            Group::Pinned => "sidebar-heading-pinned",
+        };
+        Self::heading(title)
+            .id(tag)
+            .debug_selector(move || tag.to_string())
+            .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+            .drag_over::<DraggedPlace>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+            .can_drop(move |payload: &dyn Any, _: &mut Window, cx: &mut App| {
+                if payload.is::<DraggedPlace>() {
+                    return true;
+                }
+                let paths = if let Some(d) = payload.downcast_ref::<DraggedFiles>() {
+                    d.paths.to_vec()
+                } else if let Some(e) = payload.downcast_ref::<ExternalPaths>() {
+                    e.paths().to_vec()
+                } else {
+                    return false;
+                };
+                !ops.read(cx).busy() && !paths.is_empty() && paths.iter().all(|p| p.is_dir())
+            })
+            .on_drop(cx.listener(move |_, f: &DraggedFiles, _, cx| {
+                cx.emit(SidebarEvent::AddFolders { group, paths: f.paths.to_vec() });
+            }))
+            .on_drop(cx.listener(move |_, e: &ExternalPaths, _, cx| {
+                cx.emit(SidebarEvent::AddFolders { group, paths: e.paths().to_vec() });
+            }))
+            .on_drop(cx.listener(move |this, p: &DraggedPlace, _, cx| {
+                let at = match group {
+                    Group::Favorites => this.favorites.len(),
+                    Group::Pinned => this.pinned.len(),
+                };
+                this.slot = None;
+                cx.emit(SidebarEvent::Reorder { from: (p.group, p.ix), to: (group, at) });
+            }))
     }
 
     fn menu_item(
@@ -136,6 +269,9 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.slot = None;
+        }
         let home = self.home.clone();
         let favs = self.favorites.clone();
         let pins = self.pinned.clone();
@@ -152,12 +288,13 @@ impl Render for Sidebar {
             .text_sm()
             .child(Self::heading("Home"))
             .child(self.row("home", 0, home.title.clone(), &home.path, None, cx));
-        col = col.child(Self::heading("Favorites"));
+        col = col.child(self.section_heading("Favorites", Group::Favorites, cx));
         for (i, e) in favs.iter().enumerate() {
             col = col.child(self.row("fav", i, e.display_title(), &e.path, Some(Group::Favorites), cx));
         }
-        if !pins.is_empty() {
-            col = col.child(Self::heading("Pinned"));
+        // The Pinned heading shows during any drag so an empty section can still receive a folder.
+        if !pins.is_empty() || cx.has_active_drag() {
+            col = col.child(self.section_heading("Pinned", Group::Pinned, cx));
             for (i, e) in pins.iter().enumerate() {
                 col = col.child(self.row("pinned", i, e.display_title(), &e.path, Some(Group::Pinned), cx));
             }

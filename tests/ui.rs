@@ -1979,3 +1979,155 @@ fn column_view_drag_onto_left_column_folder_moves(cx: &mut TestAppContext) {
     assert_eq!(pane_names(&b, 1, cx), ["g.txt"]);
     assert_eq!(banner_of(&b, cx), None);
 }
+
+#[gpui::test]
+fn drag_onto_crumb_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, sub) = (t.path().join("a"), t.path().join("a").join("sub"));
+    fs::create_dir_all(&sub).unwrap();
+    touch(&sub, &["x.txt"]);
+    let (b, cx) = mount_home(cx, t.path(), &sub);
+    let n = cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).crumbs(cx).len());
+    let sel: &'static str = Box::leak(format!("crumb-1-{}", n - 2).into_boxed_str());
+    let from = row_pt(&b, 1, "x.txt", cx);
+    // Selecting the row changes the status text and shifts the crumbs, so aim after the drag starts.
+    drag_to_sel(cx, from, sel, 0., Modifiers::none());
+    assert_eq!(names(&a), ["sub", "x.txt"]);
+    assert!(names(&sub).is_empty());
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+/// Browser at `dir` with the given sidebar entries seeded in a tempdir state store (also its home).
+fn with_sidebar<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &Path,
+    favs: &[&Path],
+    pins: &[&Path],
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), favs, pins, leaf_snap(&[dir], 0));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, vcx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    (b, vcx, state)
+}
+
+fn fav_paths(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Vec<PathBuf> {
+    cx.read(|cx| b.read(cx).favorites().iter().map(|e| e.path.clone()).collect())
+}
+
+fn flush_save(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+}
+
+fn bounds_of(cx: &mut VisualTestContext, sel: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds(sel).unwrap_or_else(|| panic!("{sel} not laid out"))
+}
+
+/// Drags the row `from` to the element `sel`, which may only appear once the drag is under way.
+fn drag_to_sel(cx: &mut VisualTestContext, from: gpui::Point<gpui::Pixels>, sel: &'static str, dy: f32, mods: Modifiers) {
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(6.), from.y), left, Modifiers::none());
+    cx.run_until_parked();
+    let r = bounds_of(cx, sel);
+    let to = gpui::point(r.center().x, r.center().y + gpui::px(dy));
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_up(to, left, mods);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn drag_onto_sidebar_folder_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, fav) = (t.path().join("a"), t.path().join("fav"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&fav).unwrap();
+    touch(&a, &["x.txt", "y.txt"]);
+    let (b, cx, _s) = with_sidebar(cx, &a, &[&fav], &[]);
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "place-fav-0", 0., Modifiers::none());
+    assert_eq!(names(&a), ["y.txt"]);
+    assert_eq!(names(&fav), ["x.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["y.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn drag_folder_onto_pinned_heading_pins_with_no_pins_and_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    let (b, cx, state) = with_sidebar(cx, &a, &[], &[]);
+    assert!(cx.debug_bounds("sidebar-heading-pinned").is_none(), "no Pinned heading without pins or a drag");
+    let from = row_pt(&b, 1, "sub", cx);
+    drag_to_sel(cx, from, "sidebar-heading-pinned", 0., Modifiers::none());
+    assert_eq!(pinned_paths(&b, cx), [canon(&a.join("sub"))]);
+    assert!(cx.debug_bounds("place-pinned-0").is_some());
+    assert_eq!(names(&a), ["sub"]); // nothing moved
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.pinned.iter().map(|e| e.path.clone()).collect::<Vec<_>>(), [canon(&a.join("sub"))]);
+}
+
+#[gpui::test]
+fn drag_file_onto_heading_refused(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    touch(&a, &["x.txt"]);
+    let (b, cx, _s) = with_sidebar(cx, &a, &[], &[]);
+    // A file alone, then a file together with a folder: both refused, on both headings.
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-favorites", 0., Modifiers::none());
+    assert!(fav_paths(&b, cx).is_empty());
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-pinned", 0., Modifiers::none());
+    assert!(pinned_paths(&b, cx).is_empty());
+    keys(cx, "cmd-a");
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-favorites", 0., Modifiers::none());
+    assert!(fav_paths(&b, cx).is_empty());
+    assert_eq!(names(&a), ["sub", "x.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn reorder_favorites_by_drag_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    let (f1, f2, f3) = (t.path().join("f1"), t.path().join("f2"), t.path().join("f3"));
+    for d in [&a, &f1, &f2, &f3] {
+        fs::create_dir(d).unwrap();
+    }
+    let (b, cx, state) = with_sidebar(cx, &a, &[&f1, &f2, &f3], &[]);
+    let from = bounds_of(cx, "place-fav-0").center();
+    // Lower half of the last favorite: the slot after it.
+    drag_to_sel(cx, from, "place-fav-2", 5., Modifiers::none());
+    assert_eq!(fav_paths(&b, cx), [f2.clone(), f3.clone(), f1.clone()]);
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.favorites.iter().map(|e| e.path.clone()).collect::<Vec<_>>(), [f2, f3, f1]);
+}
+
+#[gpui::test]
+fn drag_pinned_into_favorites(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    let (f1, p1) = (t.path().join("f1"), t.path().join("p1"));
+    for d in [&a, &f1, &p1] {
+        fs::create_dir(d).unwrap();
+    }
+    let (b, cx, _s) = with_sidebar(cx, &a, &[&f1], &[&p1]);
+    let from = bounds_of(cx, "place-pinned-0").center();
+    // Upper half of the first favorite: the slot before it.
+    drag_to_sel(cx, from, "place-fav-0", -5., Modifiers::none());
+    assert_eq!(fav_paths(&b, cx), [p1, f1]);
+    assert!(pinned_paths(&b, cx).is_empty());
+}
