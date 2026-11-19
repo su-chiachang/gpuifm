@@ -8,7 +8,7 @@ use crate::fm_core::state::{PaneSnapshot, ViewMode};
 use crate::fm_core::tabs::Tabs;
 use crate::ui::actions::FilterDown;
 use crate::ui::column_view::ColumnView;
-use crate::ui::dnd::DraggedFiles;
+use crate::ui::dnd::{DragPreview, DraggedFiles, DraggedTab};
 use crate::ui::file_list::{FileList, FileListEvent};
 use crate::ui::opener::Opener;
 use crate::ui::ops::FileOps;
@@ -469,6 +469,18 @@ impl Pane {
         cx.notify();
     }
 
+    /// Moves tab `from` to position `to` (same pane); the active tab stays the same item.
+    /// Refused while a rename is in progress.
+    pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if self.active_renaming(cx) || from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        self.tabs.move_tab(from, to);
+        cx.emit(PaneEvent::Changed);
+        cx.emit(PaneEvent::Refocus);
+        cx.notify();
+    }
+
     pub fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.active_renaming(cx) || self.tabs.len() < 2 {
             return;
@@ -531,11 +543,19 @@ impl Pane {
         for (ix, t) in self.tabs.items().iter().enumerate() {
             let is_active = ix == active;
             let title = t.list.read(cx).title();
+            let drag_title = title.clone();
+            let weak = cx.entity().downgrade();
             strip = strip.child(
                 div()
                     .flex()
                     .items_center()
                     .flex_none()
+                    .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .can_drop(move |payload: &dyn Any, _: &mut Window, cx: &mut App| {
+                        let Some(d) = payload.downcast_ref::<DraggedTab>() else { return false };
+                        d.pane.0 == pane && d.ix != ix && weak.read_with(cx, |p, cx| !p.active_renaming(cx)).unwrap_or(false)
+                    })
+                    .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| this.move_tab(d.ix, ix, cx)))
                     .max_w(px(180.))
                     .rounded_md()
                     .text_sm()
@@ -554,6 +574,9 @@ impl Pane {
                             .cursor_pointer()
                             .hover(|d| d.bg(rgb(theme::HOVER_BG)))
                             .child(title)
+                            .on_drag(DraggedTab { pane: self.id, ix }, move |_, _, _, cx| {
+                                cx.new(|_| DragPreview::new(drag_title.clone()))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.select_tab(ix, cx))),
                     )
                     .when(!single, |d| {

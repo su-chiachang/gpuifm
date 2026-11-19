@@ -2131,3 +2131,59 @@ fn drag_pinned_into_favorites(cx: &mut TestAppContext) {
     assert_eq!(fav_paths(&b, cx), [p1, f1]);
     assert!(pinned_paths(&b, cx).is_empty());
 }
+
+#[gpui::test]
+fn drag_tab_reorders_keeps_active(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d1, c) = (t.path().join("a"), t.path().join("b"), t.path().join("c"));
+    for d in [&a, &d1, &c] {
+        fs::create_dir(d).unwrap();
+    }
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[&a, &d1, &c], 1));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert_eq!(tab_dirs(&b, 1, cx), [a.clone(), d1.clone(), c.clone()]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-2").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [d1.clone(), c.clone(), a.clone()]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 0)); // still the "b" tab
+    assert_eq!(dir_of(&b, cx), d1);
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.layout.leaves()[0].tabs, [d1.clone(), c.clone(), a.clone()]);
+    assert_eq!(saved.layout.leaves()[0].active, 0);
+    // Dragging the active tab right: it follows.
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-1").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [c, d1.clone(), a]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    assert_eq!(dir_of(&b, cx), d1);
+}
+
+#[gpui::test]
+fn drag_tab_refused_while_renaming(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d1) = (t.path().join("a"), t.path().join("b"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d1).unwrap();
+    touch(&a, &["x.txt"]);
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[&a, &d1], 0));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    keys(cx, "down enter");
+    assert!(renaming(&b, cx).is_some());
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-1").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [a, d1]);
+}
