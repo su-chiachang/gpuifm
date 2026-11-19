@@ -11,17 +11,19 @@ use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Files dragged out of a list row. `parents` is computed once at drag start.
+/// Files dragged out of a list row. `parents` and `all_dirs` are computed once at drag start.
 #[derive(Clone)]
 pub struct DraggedFiles {
     pub paths: Arc<[PathBuf]>,
     pub parents: Arc<[PathBuf]>,
+    /// Every dragged entry is a folder (what the sidebar headings accept), from the listing.
+    pub all_dirs: bool,
 }
 
 impl DraggedFiles {
-    pub fn new(paths: Vec<PathBuf>) -> Self {
+    pub fn new(paths: Vec<PathBuf>, all_dirs: bool) -> Self {
         let parents = paths.iter().map(|p| p.parent().map(Path::to_path_buf).unwrap_or_default()).collect::<Vec<_>>();
-        Self { paths: paths.into(), parents: parents.into() }
+        Self { paths: paths.into(), parents: parents.into(), all_dirs }
     }
 }
 

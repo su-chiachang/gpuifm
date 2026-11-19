@@ -297,7 +297,7 @@ impl ColumnView {
                     .map(|(ix, e)| {
                         let is_sel = selected.as_deref() == Some(e.path.as_path());
                         let (is_dir, dest) = (e.is_dir, e.path.clone());
-                        let drag = DraggedFiles::new(vec![e.path.clone()]);
+                        let drag = DraggedFiles::new(vec![e.path.clone()], e.is_dir);
                         let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);
                         div()
                             .id(ix)

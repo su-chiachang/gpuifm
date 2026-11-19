@@ -308,6 +308,13 @@ impl FileList {
             .map(|e| e.path.clone())
     }
 
+    /// The whole selection as a drag payload (paths cloned once, folders checked from the listing).
+    fn selection_drag(&self) -> DraggedFiles {
+        let ixs = self.selection.indices();
+        let all_dirs = !ixs.is_empty() && ixs.iter().all(|&i| self.entries.get(i).is_some_and(|e| e.is_dir));
+        DraggedFiles::new(self.selected_paths(), all_dirs)
+    }
+
     fn selected_paths(&self) -> Vec<PathBuf> {
         self.selection
             .indices()
@@ -836,7 +843,8 @@ impl Render for FileList {
                     let now = SystemTime::now();
                     let can_act = this.can_act();
                     let (pane, weak, ops) = (this.pane, cx.entity().downgrade(), this.ops.clone());
-                    let sel_drag = DraggedFiles::new(this.selected_paths());
+                    // Built only when a visible row is selected, not on every paint.
+                    let sel_drag = std::cell::OnceCell::new();
                     range
                         .filter_map(|ix| this.entries.get(ix).map(|e| (ix, e)))
                         .map(|(ix, e)| {
@@ -848,7 +856,11 @@ impl Render for FileList {
                                 .map(|r| r.input.clone());
                             let path = e.path.clone();
                             let is_dir = e.is_dir;
-                            let drag = if is_sel { sel_drag.clone() } else { DraggedFiles::new(vec![path.clone()]) };
+                            let drag = if is_sel {
+                                sel_drag.get_or_init(|| this.selection_drag()).clone()
+                            } else {
+                                DraggedFiles::new(vec![path.clone()], is_dir)
+                            };
                             let (weak2, ops2) = (weak.clone(), ops.clone());
                             let (weak, drag_path, dest) = (weak.clone(), path.clone(), path.clone());
                             let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);

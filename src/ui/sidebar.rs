@@ -234,14 +234,17 @@ impl Sidebar {
                 if payload.is::<DraggedPlace>() {
                     return true;
                 }
-                let paths = if let Some(d) = payload.downcast_ref::<DraggedFiles>() {
-                    d.paths.to_vec()
-                } else if let Some(e) = payload.downcast_ref::<ExternalPaths>() {
-                    e.paths().to_vec()
-                } else {
+                if ops.read(cx).busy() {
                     return false;
-                };
-                !ops.read(cx).busy() && !paths.is_empty() && paths.iter().all(|p| p.is_dir())
+                }
+                if let Some(d) = payload.downcast_ref::<DraggedFiles>() {
+                    !d.paths.is_empty() && d.all_dirs
+                } else if let Some(e) = payload.downcast_ref::<ExternalPaths>() {
+                    // Finder drags are rare and not repainted per row; stat them.
+                    !e.paths().is_empty() && e.paths().iter().all(|p| p.is_dir())
+                } else {
+                    false
+                }
             })
             .on_drop(cx.listener(move |_, f: &DraggedFiles, _, cx| {
                 cx.emit(SidebarEvent::AddFolders { group, paths: f.paths.to_vec() });
