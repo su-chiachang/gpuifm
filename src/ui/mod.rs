@@ -2,6 +2,7 @@ pub mod actions;
 pub mod browser;
 pub mod column_view;
 pub mod commands;
+pub mod dnd;
 pub mod palette;
 pub mod file_list;
 pub mod menus;

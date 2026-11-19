@@ -10,3 +10,5 @@ pub const HOVER_BG: u32 = 0x2f2f31;
 pub const SIDEBAR_ACTIVE_BG: u32 = 0x3b3b3e;
 pub const ERROR: u32 = 0xff6b6b;
 pub const ACCENT: u32 = 0x0a84ff;
+pub const DROP_BG: u32 = 0x1d3a5f;
+pub const DROP_RING: u32 = 0x0a84ff;

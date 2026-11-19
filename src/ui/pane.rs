@@ -88,7 +88,7 @@ impl Pane {
         view_mode: ViewMode,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = Self::make_tab(start, &ops, &opener, show_hidden, sort, view_mode == ViewMode::Column, cx);
+        let first = Self::make_tab(id.0, start, &ops, &opener, show_hidden, sort, view_mode == ViewMode::Column, cx);
         let busy = cx.observe(&ops, |_, _, cx| cx.notify());
         Self {
             id,
@@ -107,7 +107,9 @@ impl Pane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_tab(
+        pane: u64,
         start: PathBuf,
         ops: &Entity<FileOps>,
         opener: &Rc<dyn Opener>,
@@ -119,6 +121,7 @@ impl Pane {
         let list = cx.new(|cx| {
             let mut l = FileList::new(start, ops.clone(), opener.clone(), show_hidden, sort, cx);
             l.set_compact_initial(compact);
+            l.set_pane_tag(pane);
             l
         });
         let sub = cx.subscribe(&list, |this, l, ev: &FileListEvent, cx| match ev {
@@ -147,7 +150,7 @@ impl Pane {
     pub fn restore_tabs(&mut self, snap: &PaneSnapshot, cx: &mut Context<Self>) {
         for dir in snap.tabs.iter().skip(1) {
             let compact = self.view_mode == ViewMode::Column;
-            let tab = Self::make_tab(dir.clone(), &self.ops, &self.opener, self.show_hidden, self.sort, compact, cx);
+            let tab = Self::make_tab(self.id.0, dir.clone(), &self.ops, &self.opener, self.show_hidden, self.sort, compact, cx);
             self.tabs.add_after_active(tab);
         }
         self.tabs.select(snap.active);
@@ -385,7 +388,7 @@ impl Pane {
             let l = self.active_list().read(cx);
             (l.current_dir().to_path_buf(), l.show_hidden())
         };
-        let tab = Self::make_tab(dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         self.apply_filter(cx);
         cx.emit(PaneEvent::Changed);
@@ -397,7 +400,7 @@ impl Pane {
     /// active tab stays where it is. Adding several background tabs in reverse keeps their order.
     pub fn add_tab(&mut self, dir: PathBuf, activate: bool, cx: &mut Context<Self>) {
         let (hidden, prev) = (self.show_hidden, self.tabs.active());
-        let tab = Self::make_tab(dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         if !activate {
             self.tabs.select(prev);

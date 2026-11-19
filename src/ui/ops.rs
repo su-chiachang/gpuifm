@@ -68,7 +68,7 @@ impl FileOps {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
-    pub fn run(&mut self, req: OpRequest, origin: EntityId, rename_after: bool, cx: &mut Context<Self>) {
+    pub fn run(&mut self, req: OpRequest, origin: Option<EntityId>, rename_after: bool, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -92,7 +92,7 @@ impl FileOps {
                             touched: out.touched,
                             select: out.results,
                             rename: rename_after,
-                            origin: Some(origin),
+                            origin,
                         });
                         if changed {
                             cx.emit(FileOpsEvent::StackChanged);
