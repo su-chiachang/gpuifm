@@ -168,8 +168,7 @@ impl Render for Inspector {
             return root.child(Self::dim(p));
         }
         let (Some(d), [path]) = (&self.details, self.sel.as_slice()) else { return root };
-        let is_dir = std::fs::metadata(path).is_ok_and(|m| m.is_dir());
-        let preview: AnyElement = if self.previewable {
+                let preview: AnyElement = if self.previewable {
             img(path.clone())
                 .image_cache(&self.cache)
                 .object_fit(ObjectFit::Contain)
@@ -177,8 +176,7 @@ impl Render for Inspector {
                 .size_full()
                 .into_any_element()
         } else {
-            let package = is_dir && path.extension().is_some_and(|e| e == "app");
-            div().size_full().flex().items_center().justify_center().child(icon_el(Some(&self.icons), path, is_dir, package, 128., cx)).into_any_element()
+            div().size_full().flex().items_center().justify_center().child(icon_el(Some(&self.icons), path, d.is_dir, d.is_package, 128., cx)).into_any_element()
         };
         let (open_p, reveal_p, copy_p) = (path.clone(), path.clone(), path.clone());
         let (o1, o2) = (self.opener.clone(), self.opener.clone());

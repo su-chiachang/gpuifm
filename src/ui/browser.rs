@@ -133,7 +133,7 @@ impl Browser {
 
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let BrowserOptions { start, store, index_roots, opener, watch, places, icons } = opts;
-        let icons = cx.new(|_| IconCache::new(icons));
+        let icons = cx.new(|_| IconCache::new(icons, places.home.clone()));
         let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
         let (favorites, pinned, show_hidden, sidebar_visible) = match &loaded {
             Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden, l.sidebar_visible),
@@ -294,6 +294,11 @@ impl Browser {
     /// Canonical folders currently watched (empty when watching is off).
     pub fn watched_dirs(&self) -> BTreeSet<PathBuf> {
         self.watcher.as_ref().map(|w| w.watched().clone()).unwrap_or_default()
+    }
+
+    /// The shared file-operations queue.
+    pub fn ops(&self) -> &Entity<FileOps> {
+        &self.ops
     }
 
     /// The shared icon cache.

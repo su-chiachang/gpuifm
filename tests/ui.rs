@@ -1847,6 +1847,50 @@ fn dragging_unselected_row_selects_only_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn drop_refused_while_ops_busy(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d, scratch) = (t.path().join("a"), t.path().join("d"), t.path().join("scratch"));
+    for dir in [&a, &d, &scratch] {
+        fs::create_dir(dir).unwrap();
+    }
+    touch(&a, &["x.txt", "y.txt"]);
+    let (b, cx, _state) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(to, left, Modifiers::none());
+    assert!(cx.update(|_, cx| cx.has_active_drag()));
+    // A copy is now in flight (background work only finishes when the executor is parked).
+    let ops = cx.read(|cx| b.read(cx).ops().clone());
+    let req = nanofm::fm_core::ops::OpRequest::Copy { srcs: vec![a.join("y.txt")], dest: scratch.clone() };
+    cx.update(|_, cx| ops.update(cx, |o, cx| o.run(req, None, false, cx)));
+    assert!(cx.read(|cx| ops.read(cx).busy()));
+    cx.simulate_mouse_up(to, left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(names(&a), ["x.txt", "y.txt"]);
+    assert!(names(&d).is_empty());
+    assert_eq!(names(&scratch), ["y.txt"]);
+}
+
+#[gpui::test]
+fn row_drag_blocked_during_rename(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    assert!(renaming(&b, cx).is_some());
+    let from = row_pt(&b, 1, "c.txt", cx);
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(9.), from.y), left, Modifiers::none());
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    cx.simulate_mouse_up(from, left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[gpui::test]
 fn drag_onto_folder_row_moves_into(cx: &mut TestAppContext) {
     let t = tempfile::tempdir().unwrap();
     fs::create_dir(t.path().join("sub")).unwrap();
@@ -2366,6 +2410,10 @@ impl IconSource for FakeIcons {
         self.0.lock().unwrap().push(path.to_path_buf());
         self.1.clone()
     }
+    fn generic_png(&self, folder: bool, _px: u32) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().push(PathBuf::from(if folder { "<generic-folder>" } else { "<generic-plain>" }));
+        self.1.clone()
+    }
 }
 
 fn mount_icons<'a>(cx: &'a mut TestAppContext, dir: &Path, fake: &FakeIcons) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
@@ -2396,7 +2444,10 @@ fn icons_fetched_once_per_kind(cx: &mut TestAppContext) {
     // Home, the root and volumes are their own kinds (per path); every other folder shares one.
     let home = nanofm::fm_core::places::home_dir();
     let shared = |p: &&PathBuf| p.is_dir() && **p != home && p.parent().is_some_and(|q| q != Path::new("/Volumes"));
-    assert_eq!(calls.iter().filter(shared).count(), 1, "{calls:?}");
+    // ...and that kind comes from the generic source, never from whichever folder was seen first.
+    assert_eq!(calls.iter().filter(shared).count(), 0, "{calls:?}");
+    let generic = |n: &str| calls.iter().filter(|p| p.as_path() == Path::new(n)).count();
+    assert_eq!((generic("<generic-folder>"), generic("<generic-plain>")), (1, 0), "{calls:?}");
 }
 
 #[gpui::test]

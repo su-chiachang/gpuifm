@@ -2,7 +2,6 @@
 //! icon once per kind in small chunks, and the element helper that falls back to a glyph.
 
 use crate::fm_core::icons::{IconKey, icon_key};
-use crate::fm_core::places::home_dir;
 use crate::ui::theme;
 use gpui::{
     AnyElement, App, Context, Entity, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Styled,
@@ -15,14 +14,17 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::{Duration, Instant};
 
-/// Keys fetched per tick before yielding to the event loop.
-const CHUNK: usize = 4;
+/// Time spent fetching icons per tick before yielding to the event loop (at least one key runs).
+const TICK_BUDGET: Duration = Duration::from_millis(4);
 
 /// Where icons come from. Only ever called on the main thread.
 pub trait IconSource {
     /// PNG bytes of the icon for `path`, `px` pixels square; `None` when there is none.
     fn icon_png(&self, path: &Path, px: u32) -> Option<Vec<u8>>;
+    /// PNG bytes of the generic folder (`folder`) or plain-document icon, independent of any path.
+    fn generic_png(&self, folder: bool, px: u32) -> Option<Vec<u8>>;
 }
 
 /// No icons at all (headless tests, non-macOS): every consumer shows its glyph.
@@ -32,6 +34,9 @@ impl IconSource for NoIcons {
     fn icon_png(&self, _: &Path, _: u32) -> Option<Vec<u8>> {
         None
     }
+    fn generic_png(&self, _: bool, _: u32) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// NSWorkspace icons (macOS).
@@ -39,21 +44,42 @@ impl IconSource for NoIcons {
 pub struct SystemIcons;
 
 #[cfg(target_os = "macos")]
+impl SystemIcons {
+    fn png(image: &objc2_app_kit::NSImage, px: u32) -> Option<Vec<u8>> {
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
+        let mut rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(px as f64, px as f64));
+        // SAFETY: `rect` is a valid pointer for the call; no context or hints.
+        let cg = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
+        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
+        // SAFETY: an empty properties dictionary is valid.
+        let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }?;
+        Some(data.to_vec())
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl IconSource for SystemIcons {
     fn icon_png(&self, path: &Path, px: u32) -> Option<Vec<u8>> {
-        use objc2::AnyThread;
         use objc2::rc::autoreleasepool;
-        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
-        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSString;
         autoreleasepool(|_| {
             let image = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(&path.to_string_lossy()));
-            let mut rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(px as f64, px as f64));
-            // SAFETY: `rect` is a valid pointer for the call; no context or hints.
-            let cg = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
-            let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
-            // SAFETY: an empty properties dictionary is valid.
-            let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }?;
-            Some(data.to_vec())
+            Self::png(&image, px)
+        })
+    }
+
+    #[allow(deprecated)]
+    fn generic_png(&self, folder: bool, px: u32) -> Option<Vec<u8>> {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSString;
+        autoreleasepool(|_| {
+            let uti = NSString::from_str(if folder { "public.folder" } else { "public.data" });
+            let image = NSWorkspace::sharedWorkspace().iconForFileType(&uti);
+            Self::png(&image, px)
         })
     }
 }
@@ -68,7 +94,7 @@ enum Slot {
 /// Cache of icons keyed by (kind, size); one fetch per key, on the main thread.
 pub struct IconCache {
     source: Rc<dyn IconSource>,
-    slots: HashMap<(IconKey, u32), Slot>,
+    slots: HashMap<u32, HashMap<IconKey, Slot>>,
     queue: VecDeque<(IconKey, u32, PathBuf)>,
     pumping: bool,
     home: PathBuf,
@@ -89,8 +115,8 @@ impl Future for YieldNow {
 }
 
 impl IconCache {
-    pub fn new(source: Rc<dyn IconSource>) -> Self {
-        Self { source, slots: HashMap::new(), queue: VecDeque::new(), pumping: false, home: home_dir() }
+    pub fn new(source: Rc<dyn IconSource>, home: PathBuf) -> Self {
+        Self { source, slots: HashMap::new(), queue: VecDeque::new(), pumping: false, home }
     }
 
     /// The icon for `path` at `px` logical points, if already fetched; otherwise queues the fetch
@@ -102,12 +128,12 @@ impl IconCache {
                 || p.parent() == Some(home.as_path())
                 || p.parent().is_none_or(|q| q == Path::new("/Volumes"))
         });
-        match self.slots.get(&(key.clone(), px)) {
+        match self.slots.get(&px).and_then(|m| m.get(&key)) {
             Some(Slot::Ready(i)) => return Some(i.clone()),
             Some(_) => return None,
             None => {}
         }
-        self.slots.insert((key.clone(), px), Slot::Pending);
+        self.slots.entry(px).or_default().insert(key.clone(), Slot::Pending);
         self.queue.push_back((key, px, path.to_path_buf()));
         if !self.pumping {
             self.pumping = true;
@@ -121,16 +147,25 @@ impl IconCache {
         None
     }
 
-    /// Fetches up to `CHUNK` queued keys and notifies once; false when the queue is drained.
+    /// Fetches queued keys for about `TICK_BUDGET` (at least one) and notifies once; false when
+    /// the queue is drained.
     fn step(&mut self, cx: &mut Context<Self>) -> bool {
-        for _ in 0..CHUNK {
-            let Some((key, px, path)) = self.queue.pop_front() else { break };
+        let start = Instant::now();
+        while let Some((key, px, path)) = self.queue.pop_front() {
             // Fetch at twice the size for retina displays.
-            let slot = match self.source.icon_png(&path, px * 2) {
+            let png = match &key {
+                IconKey::Folder => self.source.generic_png(true, px * 2),
+                IconKey::Plain => self.source.generic_png(false, px * 2),
+                _ => self.source.icon_png(&path, px * 2),
+            };
+            let slot = match png {
                 Some(png) => Slot::Ready(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
                 None => Slot::Missing,
             };
-            self.slots.insert((key, px), slot);
+            self.slots.entry(px).or_default().insert(key, slot);
+            if start.elapsed() >= TICK_BUDGET {
+                break;
+            }
         }
         cx.notify();
         let more = !self.queue.is_empty();
@@ -141,15 +176,15 @@ impl IconCache {
     // ---- test accessors ------------------------------------------------------------------------
 
     pub fn is_ready(&self, key: &IconKey, px: u32) -> bool {
-        matches!(self.slots.get(&(key.clone(), px)), Some(Slot::Ready(_)))
+        matches!(self.slots.get(&px).and_then(|m| m.get(key)), Some(Slot::Ready(_)))
     }
 
     pub fn is_missing(&self, key: &IconKey, px: u32) -> bool {
-        matches!(self.slots.get(&(key.clone(), px)), Some(Slot::Missing))
+        matches!(self.slots.get(&px).and_then(|m| m.get(key)), Some(Slot::Missing))
     }
 
     pub fn ready_count(&self) -> usize {
-        self.slots.values().filter(|s| matches!(s, Slot::Ready(_))).count()
+        self.slots.values().flat_map(|m| m.values()).filter(|s| matches!(s, Slot::Ready(_))).count()
     }
 }
 
@@ -182,5 +217,14 @@ mod tests {
     fn system_icons_png_magic() {
         let png = SystemIcons.icon_png(Path::new("/"), 32).expect("icon for /");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    #[ignore]
+    fn system_generic_icons_png_magic() {
+        for folder in [true, false] {
+            let png = SystemIcons.generic_png(folder, 32).expect("generic icon");
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        }
     }
 }

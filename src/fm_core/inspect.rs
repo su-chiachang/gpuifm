@@ -12,6 +12,8 @@ pub struct Details {
     pub resolution: Option<String>,
     pub created: String,
     pub modified: String,
+    pub is_dir: bool,
+    pub is_package: bool,
 }
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tif", "tiff", "bmp"];
@@ -32,6 +34,8 @@ pub fn details(path: &Path, home: &Path) -> Option<Details> {
     let parent = path.parent().map(|p| abbreviate(p, home)).unwrap_or_default();
     let resolution = if e.is_dir || e.is_package { None } else { resolution(path) };
     Some(Details {
+        is_dir: e.is_dir,
+        is_package: e.is_package,
         name: e.name,
         parent_abbrev: parent,
         kind: e.kind,
