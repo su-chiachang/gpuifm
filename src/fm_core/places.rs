@@ -191,7 +191,7 @@ pub enum Section {
 
 /// Moves an entry within or between the two lists. `to.1` is an insertion slot in the destination
 /// list as it was before the move (Swift adjusts it down by one when moving forward in the same list).
-/// Returns false (and changes nothing) when `from` is out of range.
+/// Returns false (and changes nothing) when `from` is out of range or the move lands back on its own slot.
 pub fn move_entry(
     favs: &mut Vec<SidebarEntry>,
     pins: &mut Vec<SidebarEntry>,
@@ -203,6 +203,9 @@ pub fn move_entry(
         Section::Pinned => &*pins,
     };
     if from.1 >= src.len() {
+        return false;
+    }
+    if from.0 == to.0 && (to.1 == from.1 || to.1 == from.1 + 1) {
         return false;
     }
     let entry = match from.0 {
@@ -419,6 +422,16 @@ mod tests {
         assert!(p.is_empty());
         assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Pinned, 99)));
         assert_eq!(names(&p), ["a"]);
+    }
+
+    #[test]
+    fn move_onto_own_slot_is_noop() {
+        let (mut f, mut p) = (ents(&["a", "b", "c"]), ents(&[]));
+        assert!(!move_entry(&mut f, &mut p, (Section::Favorites, 1), (Section::Favorites, 1)));
+        assert!(!move_entry(&mut f, &mut p, (Section::Favorites, 1), (Section::Favorites, 2)));
+        assert_eq!(names(&f), ["a", "b", "c"]);
+        let (mut f, mut p) = (ents(&["a"]), ents(&["x"]));
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Pinned, 0)));
     }
 
     #[test]
