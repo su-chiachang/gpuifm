@@ -1,8 +1,11 @@
+pub mod dnd;
 pub mod entry;
 pub mod filter;
 pub mod format;
 pub mod fuzzy;
 pub mod history;
+pub mod icons;
+pub mod inspect;
 pub mod kind;
 pub mod layout;
 pub mod tabs;

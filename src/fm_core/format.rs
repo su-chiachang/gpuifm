@@ -57,6 +57,15 @@ pub fn format_modified(t: Option<SystemTime>, now: SystemTime) -> String {
     }
 }
 
+/// Inspector date: "17 November 2026 at 14:03", "--" when unknown.
+pub fn format_long_date(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "--".into();
+    };
+    let dt: DateTime<Local> = t.into();
+    dt.format("%-d %B %Y at %H:%M").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +100,12 @@ mod tests {
         assert_eq!(format_modified(Some(st(2026, 11, 16, 9, 5)), now), "Yesterday at 09:05");
         assert_eq!(format_modified(Some(st(2026, 11, 1, 9, 12)), now), "1 Nov 2026 at 09:12");
         assert_eq!(format_modified(None, now), "--");
+    }
+
+    #[test]
+    fn long_date() {
+        assert_eq!(format_long_date(Some(st(2026, 11, 17, 14, 3))), "17 November 2026 at 14:03");
+        assert_eq!(format_long_date(Some(st(2026, 3, 5, 9, 7))), "5 March 2026 at 09:07");
+        assert_eq!(format_long_date(None), "--");
     }
 }

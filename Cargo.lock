@@ -3416,6 +3416,7 @@ dependencies = [
  "chrono",
  "futures",
  "gpui",
+ "imagesize",
  "notify",
  "objc2",
  "objc2-foundation",

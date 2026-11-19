@@ -7,11 +7,7 @@ use gpui::{
 };
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    Favorites,
-    Pinned,
-}
+pub use crate::fm_core::places::Section as Group;
 
 pub enum SidebarEvent {
     Open { path: PathBuf, new_tab: bool },
