@@ -6,17 +6,21 @@ use crate::fm_core::listing::list_dir;
 use crate::fm_core::ops::{OpRequest, split_ext};
 use crate::fm_core::selection::Selection;
 use crate::fm_core::sort::{SortKey, SortOrder, sort_entries};
+use crate::fm_core::dnd::DragSource;
 use crate::ui::actions::*;
+use crate::ui::dnd::{self, DragPreview, DraggedFiles};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::ui::ops::{FileOps, FileOpsEvent};
 use crate::ui::opener::Opener;
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
-    Action, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window,
+    Action, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
     anchored, deferred, div, prelude::*, px, rgb, uniform_list,
 };
 use std::path::{Path, PathBuf};
+use std::any::Any;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -68,11 +72,14 @@ pub struct FileList {
     load_task: Option<Task<()>>,
     ops: Entity<FileOps>,
     rename: Option<RenameSession>,
+    /// Owning pane, used to make row selectors unique (`row-{pane}-{ix}`).
+    pane: u64,
     /// Row context menu: where it was opened.
     menu: Option<Point<Pixels>>,
     focus_rename: bool,
     rename_request: bool,
     reload_after_rename: bool,
+    icons: Option<Entity<IconCache>>,
     _subs: Vec<Subscription>,
 }
 
@@ -88,11 +95,29 @@ const SIZE_W: f32 = 90.;
 const DATE_W: f32 = 170.;
 const KIND_W: f32 = 140.;
 
+/// `can_drop` predicate of a drop target onto folder `dest`.
+fn drop_pred(
+    weak: WeakEntity<FileList>,
+    ops: Entity<FileOps>,
+    dest: PathBuf,
+) -> impl Fn(&dyn Any, &mut Window, &mut App) -> bool + 'static {
+    move |payload, window, cx| {
+        let busy = ops.read(cx).busy();
+        weak.read_with(cx, |l, _| l.can_act()).unwrap_or(false) && dnd::accepts(payload, &dest, window.modifiers().alt, busy)
+    }
+}
+
 fn leaf_of(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 impl FileList {
+    /// Shows native icons from `icons` in the rows (glyphs without it).
+    pub fn set_icons(&mut self, icons: Entity<IconCache>, cx: &mut Context<Self>) {
+        self._subs.push(cx.observe(&icons, |_, _, cx| cx.notify()));
+        self.icons = Some(icons);
+    }
+
     pub fn new(
         start: PathBuf,
         ops: Entity<FileOps>,
@@ -132,10 +157,12 @@ impl FileList {
             load_task: None,
             ops,
             rename: None,
+            pane: 0,
             menu: None,
             focus_rename: false,
             rename_request: false,
             reload_after_rename: false,
+            icons: None,
             _subs: vec![sub],
         };
         s.reload(cx);
@@ -177,6 +204,35 @@ impl FileList {
 
     pub(crate) fn set_compact_initial(&mut self, v: bool) {
         self.compact = v;
+    }
+
+    pub fn set_pane_tag(&mut self, pane: u64) {
+        self.pane = pane;
+    }
+
+    /// Drag start on an unselected row: it becomes the only selected row (a selected row drags the selection).
+    fn select_for_drag(&mut self, ix: usize, path: &Path, cx: &mut Context<Self>) {
+        if !self.can_act() || self.selection.contains(ix) || self.entries.get(ix).is_none_or(|e| e.path != path) {
+            return;
+        }
+        self.selection.set(Some(ix));
+        cx.emit(FileListEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    /// Drops internally dragged `paths` onto folder `dest` (moves, or copies with `alt`).
+    pub fn drop_files(&mut self, paths: &[PathBuf], dest: &Path, alt: bool, cx: &mut Context<Self>) -> bool {
+        self.can_act() && dnd::perform(&self.ops, paths, dest, alt, DragSource::Internal, cx)
+    }
+
+    /// Whether `payload` could be dropped onto folder `dest` right now (lexical; runs at paint).
+    pub fn accepts_drop(&self, payload: &dyn Any, dest: &Path, alt: bool, cx: &App) -> bool {
+        self.can_act() && dnd::accepts(payload, dest, alt, self.ops.read(cx).busy())
+    }
+
+    /// Drops files from outside the app (Finder): always a copy.
+    pub fn drop_external(&mut self, paths: &[PathBuf], dest: &Path, cx: &mut Context<Self>) -> bool {
+        self.can_act() && dnd::perform(&self.ops, paths, dest, false, DragSource::External, cx)
     }
 
     pub fn set_compact(&mut self, v: bool, cx: &mut Context<Self>) {
@@ -250,6 +306,13 @@ impl FileList {
             .get()
             .and_then(|i| self.entries.get(i))
             .map(|e| e.path.clone())
+    }
+
+    /// The whole selection as a drag payload (paths cloned once, folders checked from the listing).
+    fn selection_drag(&self) -> DraggedFiles {
+        let ixs = self.selection.indices();
+        let all_dirs = !ixs.is_empty() && ixs.iter().all(|&i| self.entries.get(i).is_some_and(|e| e.is_dir));
+        DraggedFiles::new(self.selected_paths(), all_dirs)
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
@@ -581,7 +644,7 @@ impl FileList {
             OpRequest::Copy { srcs, dest }
         };
         let me = cx.entity_id();
-        self.ops.update(cx, |o, cx| o.run(req, me, false, cx));
+        self.ops.update(cx, |o, cx| o.run(req, Some(me), false, cx));
     }
 
     pub fn on_duplicate(&mut self, cx: &mut Context<Self>) {
@@ -593,7 +656,7 @@ impl FileList {
             return;
         }
         let me = cx.entity_id();
-        self.ops.update(cx, |o, cx| o.run(OpRequest::Duplicate(sel), me, false, cx));
+        self.ops.update(cx, |o, cx| o.run(OpRequest::Duplicate(sel), Some(me), false, cx));
     }
 
     pub fn on_trash(&mut self, cx: &mut Context<Self>) {
@@ -605,7 +668,7 @@ impl FileList {
             return;
         }
         let me = cx.entity_id();
-        self.ops.update(cx, |o, cx| o.run(OpRequest::Trash(sel), me, false, cx));
+        self.ops.update(cx, |o, cx| o.run(OpRequest::Trash(sel), Some(me), false, cx));
     }
 
     pub fn on_new_folder(&mut self, cx: &mut Context<Self>) {
@@ -614,7 +677,7 @@ impl FileList {
         }
         let dir = self.history.current().to_path_buf();
         let me = cx.entity_id();
-        self.ops.update(cx, |o, cx| o.run(OpRequest::NewFolder { dir }, me, true, cx));
+        self.ops.update(cx, |o, cx| o.run(OpRequest::NewFolder { dir }, Some(me), true, cx));
     }
 
     // ---- inline rename ---------------------------------------------------------------------
@@ -650,7 +713,7 @@ impl FileList {
         if new != leaf_of(&s.path) {
             let req = OpRequest::Rename { src: s.path.clone(), name: new };
             let me = cx.entity_id();
-            self.ops.update(cx, |o, cx| o.run(req, me, false, cx));
+            self.ops.update(cx, |o, cx| o.run(req, Some(me), false, cx));
         }
         self.after_rename(cx);
     }
@@ -778,6 +841,10 @@ impl Render for FileList {
                 self.entries.len(),
                 cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                     let now = SystemTime::now();
+                    let can_act = this.can_act();
+                    let (pane, weak, ops) = (this.pane, cx.entity().downgrade(), this.ops.clone());
+                    // Built only when a visible row is selected, not on every paint.
+                    let sel_drag = std::cell::OnceCell::new();
                     range
                         .filter_map(|ix| this.entries.get(ix).map(|e| (ix, e)))
                         .map(|(ix, e)| {
@@ -788,11 +855,15 @@ impl Render for FileList {
                                 .filter(|r| r.path == e.path)
                                 .map(|r| r.input.clone());
                             let path = e.path.clone();
-                            let name = if e.is_dir {
-                                format!("\u{25B8} {}", e.name)
+                            let is_dir = e.is_dir;
+                            let drag = if is_sel {
+                                sel_drag.get_or_init(|| this.selection_drag()).clone()
                             } else {
-                                format!("  {}", e.name)
+                                DraggedFiles::new(vec![path.clone()], is_dir)
                             };
+                            let (weak2, ops2) = (weak.clone(), ops.clone());
+                            let (weak, drag_path, dest) = (weak.clone(), path.clone(), path.clone());
+                            let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);
                             let dim = rgb(if is_sel { theme::TEXT } else { theme::TEXT_DIM });
                             let name_cell = match renaming {
                                 Some(input) => div().flex_1().min_w_0().px_1().child(input),
@@ -800,14 +871,23 @@ impl Render for FileList {
                                     .flex_1()
                                     .min_w_0()
                                     .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(name),
+                                    .child(icon)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(e.name.clone()),
+                                    ),
                             };
                             div()
                                 .id(ix)
-                                .debug_selector(move || format!("row-{ix}"))
+                                .debug_selector(move || format!("row-{pane}-{ix}"))
                                 .w_full()
                                 .min_w_0()
                                 .overflow_hidden()
@@ -861,6 +941,27 @@ impl Render for FileList {
                                     cx.emit(FileListEvent::SelectionChanged);
                                     cx.notify();
                                 }))
+                                .when(can_act, |d| {
+                                    d.on_drag(drag, move |dragged, _, _, cx| {
+                                        if !is_sel {
+                                            weak.update(cx, |l, cx| l.select_for_drag(ix, &drag_path, cx)).ok();
+                                        }
+                                        cx.new(|_| DragPreview::for_paths(&dragged.paths))
+                                    })
+                                })
+                                .when(is_dir, |d| {
+                                    let pred = drop_pred(weak2.clone(), ops2.clone(), dest.clone());
+                                    let dest2 = dest.clone();
+                                    d.drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                                        .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                                        .can_drop(pred)
+                                        .on_drop(cx.listener(move |this, f: &DraggedFiles, window, cx| {
+                                            this.drop_files(&f.paths, &dest, window.modifiers().alt, cx);
+                                        }))
+                                        .on_drop(cx.listener(move |this, e: &ExternalPaths, _, cx| {
+                                            this.drop_external(e.paths(), &dest2, cx);
+                                        }))
+                                })
                                 .child(name_cell)
                                 .when(!compact, |d| {
                                     d
@@ -938,6 +1039,8 @@ impl Render for FileList {
             deferred(anchored().position(pos).snap_to_window().child(m))
         });
 
+        let root_dest = self.history.current().to_path_buf();
+        let root_pred = drop_pred(cx.entity().downgrade(), self.ops.clone(), root_dest.clone());
         div()
             .key_context(match (compact, menu_open) {
                 (false, false) => "FileList",
@@ -946,6 +1049,20 @@ impl Render for FileList {
                 (true, true) => "FileList compact menu",
             })
             .track_focus(&self.focus)
+            .border_2()
+            .border_color(gpui::transparent_black())
+            .drag_over::<DraggedFiles>(|s, _, _, _| s.border_color(rgb(theme::DROP_RING)))
+            .drag_over::<ExternalPaths>(|s, _, _, _| s.border_color(rgb(theme::DROP_RING)))
+            .can_drop(root_pred)
+            .on_drop(cx.listener({
+                let dest = root_dest.clone();
+                move |this, f: &DraggedFiles, window, cx| {
+                    this.drop_files(&f.paths, &dest, window.modifiers().alt, cx);
+                }
+            }))
+            .on_drop(cx.listener(move |this, e: &ExternalPaths, _, cx| {
+                this.drop_external(e.paths(), &root_dest, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {

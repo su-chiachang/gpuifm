@@ -6,6 +6,7 @@ use crate::fm_core::watch::{DirWatcher, canon};
 use crate::fm_core::state::{PaneSnapshot, PersistedState, SidebarEntry, StateStore, ViewMode, restore};
 use crate::ui::actions::*;
 use crate::ui::commands;
+use crate::ui::dnd;
 use crate::ui::file_list::FileList;
 use crate::ui::menus;
 use crate::ui::opener::{Opener, SystemOpener};
@@ -21,6 +22,7 @@ use gpui::{
 };
 use futures::StreamExt;
 use std::collections::{BTreeSet, HashMap};
+use crate::ui::icons::{IconCache, IconSource, NoIcons};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,6 +47,8 @@ pub struct BrowserOptions {
     pub watch: bool,
     /// Home and the Go menu's folders; tests root them in a tempdir.
     pub places: Places,
+    /// Where file icons come from (tests: none, or a fake).
+    pub icons: Rc<dyn IconSource>,
 }
 
 impl Default for BrowserOptions {
@@ -56,6 +60,7 @@ impl Default for BrowserOptions {
             opener: Rc::new(SystemOpener::default()),
             watch: false,
             places: Places::system(),
+            icons: Rc::new(NoIcons),
         }
     }
 }
@@ -82,6 +87,7 @@ impl Render for DragGhost {
 pub struct Browser {
     sidebar: Entity<Sidebar>,
     ops: Entity<FileOps>,
+    icons: Entity<IconCache>,
     panes: HashMap<PaneId, Entity<Pane>>,
     pane_subs: HashMap<PaneId, Vec<Subscription>>,
     layout: LayoutTree<PaneId>,
@@ -126,7 +132,8 @@ impl Browser {
     }
 
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let BrowserOptions { start, store, index_roots, opener, watch, places } = opts;
+        let BrowserOptions { start, store, index_roots, opener, watch, places, icons } = opts;
+        let icons = cx.new(|_| IconCache::new(icons, places.home.clone()));
         let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
         let (favorites, pinned, show_hidden, sidebar_visible) = match &loaded {
             Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden, l.sidebar_visible),
@@ -152,8 +159,12 @@ impl Browser {
             s.tabs.get(s.active).cloned().unwrap_or_else(|| places.home.clone())
         };
 
-        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone()));
         let ops = cx.new(|_| FileOps::new());
+        let sidebar = cx.new(|cx| {
+            let mut s = Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone(), ops.clone());
+            s.set_icons(icons.clone(), cx);
+            s
+        });
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(
             &sidebar,
@@ -170,6 +181,26 @@ impl Browser {
                         Group::Pinned => places::remove(&mut this.pinned, *ix),
                     };
                     this.entries_changed(cx);
+                }
+                SidebarEvent::DropFiles { paths, dest, alt, source } => {
+                    dnd::perform(&this.ops, paths, dest, *alt, *source, cx);
+                }
+                SidebarEvent::AddFolders { group, paths } => {
+                    if paths.is_empty() || !paths.iter().all(|p| p.is_dir()) {
+                        return;
+                    }
+                    let list = match group {
+                        Group::Favorites => &mut this.favorites,
+                        Group::Pinned => &mut this.pinned,
+                    };
+                    if places::add_folders(list, paths, *group) {
+                        this.entries_changed(cx);
+                    }
+                }
+                SidebarEvent::Reorder { from, to } => {
+                    if places::move_entry(&mut this.favorites, &mut this.pinned, *from, *to) {
+                        this.entries_changed(cx);
+                    }
                 }
             },
         ));
@@ -189,6 +220,7 @@ impl Browser {
         let mut this = Self {
             sidebar,
             ops,
+            icons,
             panes: HashMap::new(),
             pane_subs: HashMap::new(),
             layout,
@@ -264,6 +296,16 @@ impl Browser {
         self.watcher.as_ref().map(|w| w.watched().clone()).unwrap_or_default()
     }
 
+    /// The shared file-operations queue.
+    pub fn ops(&self) -> &Entity<FileOps> {
+        &self.ops
+    }
+
+    /// The shared icon cache.
+    pub fn icons(&self) -> &Entity<IconCache> {
+        &self.icons
+    }
+
     pub fn active_list(&self, cx: &App) -> Entity<FileList> {
         self.focused_pane().read(cx).active_list().clone()
     }
@@ -317,10 +359,11 @@ impl Browser {
     // ---- pane management ---------------------------------------------------------------------
 
     fn create_pane(&mut self, id: PaneId, snap: PaneSnapshot, sort: SortOrder, window: &mut Window, cx: &mut Context<Self>) {
-        let (ops, opener, hidden, home) = (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone());
+        let (ops, opener, hidden, home, icons) =
+            (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone(), self.icons.clone());
         let first = snap.tabs.first().cloned().unwrap_or_else(|| self.places.home.clone());
         let pane = cx.new(|cx| {
-            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, cx);
+            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, icons, cx);
             p.restore_tabs(&snap, cx);
             p
         });
@@ -374,6 +417,11 @@ impl Browser {
                 self.sync_watch(cx);
             }
             PaneEvent::SelectionChanged => self.selection_changed(id, cx),
+            PaneEvent::InspectorChanged => {
+                if self.focused == id {
+                    self.rebuild_menus(cx);
+                }
+            }
         }
     }
 
@@ -399,6 +447,7 @@ impl Browser {
             list.read(cx).focus_handle(cx).focus(window);
         }
         self.sync_chrome(window, cx);
+        self.rebuild_menus(cx);
         cx.notify();
     }
 
@@ -468,7 +517,11 @@ impl Browser {
             let o = self.ops.read(cx);
             (o.undo_title(), o.redo_title())
         };
-        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible });
+        let inspector_visible = self.panes.get(&self.focused).is_some_and(|p| p.read(cx).inspector_visible());
+        menus::rebuild(
+            cx,
+            &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible, inspector_visible },
+        );
     }
 
     fn show_banner(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -1086,6 +1139,9 @@ impl Render for Browser {
             }))
             .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+                this.focused_pane().clone().update(cx, |p, cx| p.toggle_inspector(cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenInNewTab, window, cx| this.open_selection(OpenMode::NewTab, window, cx)))
             .on_action(cx.listener(|this, _: &OpenInSplit, window, cx| this.open_selection(OpenMode::Split, window, cx)))
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))

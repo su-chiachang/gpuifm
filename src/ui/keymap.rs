@@ -40,6 +40,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-shift-a", GoApplications, Some("Browser")),
         KeyBinding::new("cmd-shift-g", GoToFolder, Some("Browser")),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Browser")),
+        KeyBinding::new("alt-cmd-i", ToggleInspector, Some("Browser")),
         KeyBinding::new("alt-cmd-c", CopyPath, Some("FileList")),
         KeyBinding::new("cmd-k", TogglePalette, Some("Browser")),
         KeyBinding::new("cmd-f", FocusFilter, Some("Browser")),

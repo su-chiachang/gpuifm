@@ -110,6 +110,7 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-shift-g",
         "ctrl-cmd-s",
         "alt-cmd-c",
+        "alt-cmd-i",
     ] {
         b.push(KeyBinding::new(k, NoAction, c));
     }

@@ -6,17 +6,21 @@
 //! without recording history.
 
 use crate::fm_core::entry::FileEntry;
+use crate::ui::dnd::{DragPreview, DraggedFiles};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::fm_core::history::parent_of;
 use crate::fm_core::listing::list_dir;
 use crate::fm_core::sort::{SortOrder, sort_entries};
 use crate::ui::file_list::{FileList, FileListEvent};
+use crate::ui::inspector::Inspector;
 use crate::ui::opener::Opener;
 use crate::ui::theme;
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement, Render, ScrollHandle, Subscription, Window, div,
+    AnyElement, App, ClickEvent, Context, Entity, ExternalPaths, Focusable, IntoElement, Render, ScrollHandle, Subscription, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
-use std::path::PathBuf;
+use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 const COL_W: f32 = 220.;
@@ -45,20 +49,29 @@ pub struct ColumnView {
     opener: Rc<dyn Opener>,
     scroll: ScrollHandle,
     shown_cols: usize,
+    inspector: Option<Entity<Inspector>>,
     next_gen: u64,
     /// Drilled into this folder before its preview had loaded: select its first entry once the
     /// list has loaded (cleared when that load completes, empty or not, or on navigating away).
     select_first_after_load: Option<PathBuf>,
+    icons: Option<Entity<IconCache>>,
+    icons_sub: Option<Subscription>,
     _sub: Subscription,
 }
 
 impl ColumnView {
     pub fn new(list: Entity<FileList>, sort: SortOrder, hidden: bool, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
         let sub = Self::subscribe(&list, cx);
-        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, next_gen: 0, select_first_after_load: None, _sub: sub };
+        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, inspector: None, next_gen: 0, select_first_after_load: None, icons: None, icons_sub: None, _sub: sub };
         s.sync_lefts(cx);
         s.update_preview(cx);
         s
+    }
+
+    /// Shows native icons from `icons` in the cells (glyphs without it).
+    pub fn set_icons(&mut self, icons: Entity<IconCache>, cx: &mut Context<Self>) {
+        self.icons_sub = Some(cx.observe(&icons, |_, _, cx| cx.notify()));
+        self.icons = Some(icons);
     }
 
     fn subscribe(list: &Entity<FileList>, cx: &mut Context<Self>) -> Subscription {
@@ -97,6 +110,16 @@ impl ColumnView {
         self.sync_lefts(cx);
         self.update_preview(cx);
         cx.notify();
+    }
+
+    /// Shows (or hides) the inspector as the trailing column.
+    pub fn set_inspector(&mut self, i: Option<Entity<Inspector>>, cx: &mut Context<Self>) {
+        self.inspector = i;
+        cx.notify();
+    }
+
+    pub fn has_inspector(&self) -> bool {
+        self.inspector.is_some()
     }
 
     pub fn set_sort(&mut self, o: SortOrder, cx: &mut Context<Self>) {
@@ -256,6 +279,10 @@ impl ColumnView {
             }
             Kind::Preview => (usize::MAX, self.preview.as_ref().map_or(0, |c| c.entries.len()), None),
         };
+        let col_dir = match kind {
+            Kind::Left(i) => self.lefts[i].dir.clone(),
+            Kind::Preview => self.preview.as_ref().map(|c| c.dir.clone()).unwrap_or_default(),
+        };
         let list = uniform_list(
             ("column", tag),
             count,
@@ -269,6 +296,9 @@ impl ColumnView {
                     .filter_map(|ix| col.entries.get(ix).map(|e| (ix, e)))
                     .map(|(ix, e)| {
                         let is_sel = selected.as_deref() == Some(e.path.as_path());
+                        let (is_dir, dest) = (e.is_dir, e.path.clone());
+                        let drag = DraggedFiles::new(vec![e.path.clone()], e.is_dir);
+                        let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);
                         div()
                             .id(ix)
                             .debug_selector({
@@ -279,6 +309,7 @@ impl ColumnView {
                             .h(px(24.))
                             .flex()
                             .items_center()
+                            .gap_1()
                             .px_2()
                             .text_sm()
                             .overflow_hidden()
@@ -288,19 +319,45 @@ impl ColumnView {
                             .when(is_sel, |d| d.bg(rgb(theme::SIDEBAR_ACTIVE_BG)))
                             .when(!is_sel, |d| d.hover(|d| d.bg(rgb(theme::HOVER_BG))))
                             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(kind, ix, ev, window, cx)))
-                            .child(if e.is_dir { format!("\u{25B8} {}", e.name) } else { format!("  {}", e.name) })
+                            .on_drag(drag, |dragged, _, _, cx| cx.new(|_| DragPreview::for_paths(&dragged.paths)))
+                            .when(is_dir, |d| Self::drop_target(d, dest, cx, theme::DROP_BG))
+                            .child(icon)
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
                     })
                     .collect()
             }),
         )
         .size_full();
-        div().w(px(COL_W)).h_full().flex_none().border_r_1().border_color(rgb(theme::BORDER)).child(list).into_any_element()
+        let wrap = div().w(px(COL_W)).h_full().flex_none().border_r_1().border_color(rgb(theme::BORDER));
+        Self::drop_target(wrap, col_dir, cx, theme::DROP_BG).child(list).into_any_element()
+    }
+
+    /// Makes `el` a drop target onto folder `dest` (internal and Finder drops).
+    fn drop_target<E: InteractiveElement + 'static>(el: E, dest: PathBuf, cx: &mut Context<Self>, bg: u32) -> E {
+        let weak = cx.entity().downgrade();
+        let pred_dest = dest.clone();
+        let (dest_int, dest_ext) = (dest.clone(), dest);
+        el.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(rgb(bg)))
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(rgb(bg)))
+            .can_drop(move |payload: &dyn Any, window: &mut Window, cx: &mut App| {
+                let alt = window.modifiers().alt;
+                weak.read_with(cx, |this, cx| this.list.read(cx).accepts_drop(payload, &pred_dest, alt, cx)).unwrap_or(false)
+            })
+            .on_drop(cx.listener(move |this, f: &DraggedFiles, window, cx| {
+                let alt = window.modifiers().alt;
+                let paths = f.paths.clone();
+                let dest: &Path = &dest_int;
+                this.list.update(cx, |l, cx| l.drop_files(&paths, dest, alt, cx));
+            }))
+            .on_drop(cx.listener(move |this, e: &ExternalPaths, _, cx| {
+                this.list.update(cx, |l, cx| l.drop_external(e.paths(), &dest_ext, cx));
+            }))
     }
 }
 
 impl Render for ColumnView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let n = self.lefts.len() + 1 + usize::from(self.preview.is_some());
+        let n = self.lefts.len() + 1 + usize::from(self.preview.is_some()) + usize::from(self.inspector.is_some());
         if n != self.shown_cols {
             self.shown_cols = n;
             self.scroll.scroll_to_item(n - 1);
@@ -321,6 +378,11 @@ impl Render for ColumnView {
         );
         if self.preview.is_some() {
             row = row.child(self.column(Kind::Preview, cx));
+        }
+        if let Some(i) = &self.inspector {
+            row = row.child(
+                div().id("inspector-col").debug_selector(|| "inspector-col".to_string()).w(px(260.)).h_full().flex_none().border_l_1().border_color(rgb(theme::BORDER)).child(i.clone()),
+            );
         }
         div().flex_1().min_h_0().w_full().child(row)
     }

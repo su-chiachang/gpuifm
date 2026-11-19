@@ -24,7 +24,7 @@ fn main() {
             }
         })
         .detach();
-        nanofm::ui::menus::rebuild(cx, &nanofm::ui::menus::MenuState { undo: None, redo: None, sidebar_visible: true });
+        nanofm::ui::menus::rebuild(cx, &nanofm::ui::menus::MenuState { undo: None, redo: None, sidebar_visible: true, inspector_visible: false });
 
         let bounds = Bounds::centered(None, size(px(1000.), px(640.)), cx);
         cx.open_window(
@@ -44,6 +44,7 @@ fn main() {
                     opener: Rc::new(SystemOpener::default()),
                     watch: true,
                     places: nanofm::fm_core::places::Places::system(),
+                    icons: Rc::new(nanofm::ui::icons::SystemIcons),
                 };
                 cx.new(|cx| Browser::with_options(opts, window, cx))
             },

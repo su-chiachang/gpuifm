@@ -1105,7 +1105,7 @@ fn three_files() -> tempfile::TempDir {
 fn list_rows_have_layout(cx: &mut TestAppContext) {
     let t = three_files();
     let (_b, cx) = mount(cx, t.path());
-    for sel in ["row-0", "row-1", "row-2"] {
+    for sel in ["row-1-0", "row-1-1", "row-1-2"] {
         let r = cx.debug_bounds(sel).unwrap_or_else(|| panic!("{sel} not laid out"));
         assert!(r.size.height > gpui::px(0.), "{sel} has no height");
     }
@@ -1116,7 +1116,7 @@ fn column_rows_have_layout(cx: &mut TestAppContext) {
     let t = three_files();
     let (_b, cx) = mount(cx, t.path());
     keys(cx, "cmd-2");
-    let r = cx.debug_bounds("row-0").expect("row-0 laid out in column mode");
+    let r = cx.debug_bounds("row-1-0").expect("row-0 laid out in column mode");
     assert!(r.size.height > gpui::px(0.));
 }
 
@@ -1600,7 +1600,7 @@ fn right_click_unselected_row_selects_only_it(cx: &mut TestAppContext) {
     let t = three_files();
     let (b, cx) = mount(cx, t.path());
     keys(cx, "down");
-    let r = cx.debug_bounds("row-2").unwrap();
+    let r = cx.debug_bounds("row-1-2").unwrap();
     right_click(cx, r.center());
     assert_eq!(selected(&b, 1, cx), Some("c.txt".into()));
     assert_eq!(sel_count(&b, cx), 1);
@@ -1612,7 +1612,7 @@ fn right_click_selected_row_keeps_selection(cx: &mut TestAppContext) {
     let t = three_files();
     let (b, cx) = mount(cx, t.path());
     keys(cx, "cmd-a");
-    let r = cx.debug_bounds("row-0").unwrap();
+    let r = cx.debug_bounds("row-1-0").unwrap();
     right_click(cx, r.center());
     assert_eq!(sel_count(&b, cx), 3);
     assert!(menu_open(&b, cx));
@@ -1623,7 +1623,7 @@ fn right_click_empty_space_deselects(cx: &mut TestAppContext) {
     let t = three_files();
     let (b, cx) = mount(cx, t.path());
     keys(cx, "cmd-a");
-    let r = cx.debug_bounds("row-2").unwrap();
+    let r = cx.debug_bounds("row-1-2").unwrap();
     right_click(cx, gpui::point(r.center().x, r.bottom() + gpui::px(60.)));
     assert_eq!(sel_count(&b, cx), 0);
     assert!(!menu_open(&b, cx));
@@ -1633,7 +1633,7 @@ fn right_click_empty_space_deselects(cx: &mut TestAppContext) {
 fn context_menu_item_runs_action(cx: &mut TestAppContext) {
     let t = three_files();
     let (b, cx) = mount(cx, t.path());
-    let r = cx.debug_bounds("row-1").unwrap();
+    let r = cx.debug_bounds("row-1-1").unwrap();
     right_click(cx, r.center());
     let item = cx.debug_bounds("ctx-copy-path").expect("menu item rendered");
     cx.simulate_click(item.center(), Modifiers::none());
@@ -1647,7 +1647,7 @@ fn context_menu_reveal_uses_opener(cx: &mut TestAppContext) {
     let t = three_files();
     let rec = RevealRecorder::default();
     let (_b, cx) = mount_rec(cx, t.path(), &rec);
-    let r = cx.debug_bounds("row-0").unwrap();
+    let r = cx.debug_bounds("row-1-0").unwrap();
     right_click(cx, r.center());
     let item = cx.debug_bounds("ctx-reveal").expect("menu item rendered");
     cx.simulate_click(item.center(), Modifiers::none());
@@ -1674,7 +1674,7 @@ fn deep_path_keeps_last_crumb_visible(cx: &mut TestAppContext) {
 fn escape_closes_context_menu(cx: &mut TestAppContext) {
     let t = three_files();
     let (b, cx) = mount(cx, t.path());
-    let r = cx.debug_bounds("row-1").unwrap();
+    let r = cx.debug_bounds("row-1-1").unwrap();
     right_click(cx, r.center());
     assert!(menu_open(&b, cx));
     keys(cx, "escape");
@@ -1704,4 +1704,778 @@ fn column_drill_into_empty_folder_clears_pending_select(cx: &mut TestAppContext)
     cx.update(|window, cx| window.dispatch_action(Box::new(nanofm::ui::actions::ColumnRight), cx));
     cx.run_until_parked();
     assert!(!select_first_pending(&b, cx));
+}
+
+// ---- Phase 6: drag & drop --------------------------------------------------------------------
+
+/// Two side-by-side panes showing `a` (pane 1) and `b` (pane 2); state and home live in tempdirs.
+fn two_panes<'a>(
+    cx: &'a mut TestAppContext,
+    a: &Path,
+    b: &Path,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], LayoutTree::split(Axis::SideBySide, vec![leaf_snap(&[a], 0), leaf_snap(&[b], 0)]));
+    let dir = state.path().to_path_buf();
+    let home = dir.clone();
+    let (br, vcx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(dir)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    (br, vcx, state)
+}
+
+fn drag(cx: &mut VisualTestContext, from: gpui::Point<gpui::Pixels>, to: gpui::Point<gpui::Pixels>, mods: Modifiers) {
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_up(to, left, mods);
+    cx.run_until_parked();
+}
+
+/// Centre of the row named `name` in the active list of `pane`.
+fn row_pt(b: &gpui::Entity<Browser>, pane: u64, name: &str, cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
+    let ix = cx
+        .read(|cx| b.read(cx).pane(PaneId(pane)).unwrap().read(cx).active_list().read(cx).entry_names())
+        .iter()
+        .position(|n| n == name)
+        .unwrap_or_else(|| panic!("{name} not listed"));
+    cx.debug_bounds(Box::leak(format!("row-{pane}-{ix}").into_boxed_str())).unwrap_or_else(|| panic!("row-{pane}-{ix} not laid out")).center()
+}
+
+/// A point in the empty part of `pane`'s list (below its rows).
+fn pane_bg(pane: u64, cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
+    let r = cx.debug_bounds(Box::leak(format!("pane-{pane}").into_boxed_str())).expect("pane");
+    gpui::point(r.center().x, r.bottom() - gpui::px(80.))
+}
+
+fn touch(dir: &Path, names: &[&str]) {
+    for n in names {
+        fs::write(dir.join(n), n).unwrap();
+    }
+}
+
+fn pane_names(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.read(|cx| b.read(cx).pane(PaneId(pane)).unwrap().read(cx).active_list().read(cx).entry_names())
+}
+
+#[gpui::test]
+fn drag_row_to_other_pane_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt", "y.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&a), ["y.txt"]);
+    assert_eq!(names(&d), ["x.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["y.txt"]);
+    assert_eq!(pane_names(&b, 2, cx), ["x.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn alt_drag_row_to_other_pane_copies(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::alt());
+    assert_eq!(names(&a), ["x.txt"]);
+    assert_eq!(names(&d), ["x.txt"]);
+}
+
+#[gpui::test]
+fn drag_multi_selection_moves_all(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt", "y.txt", "z.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    keys(cx, "cmd-a");
+    assert_eq!(sel_count(&b, cx), 3);
+    let (from, to) = (row_pt(&b, 1, "y.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert!(names(&a).is_empty());
+    assert_eq!(names(&d), ["x.txt", "y.txt", "z.txt"]);
+}
+
+#[gpui::test]
+fn drag_unselected_row_moves_only_it(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt", "y.txt", "z.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    keys(cx, "down");
+    assert_eq!(selected(&b, 1, cx), Some("x.txt".into()));
+    let (from, to) = (row_pt(&b, 1, "z.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&a), ["x.txt", "y.txt"]);
+    assert_eq!(names(&d), ["z.txt"]);
+}
+
+#[gpui::test]
+fn dragging_unselected_row_selects_only_it(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-a");
+    keys(cx, "down"); // a.txt only
+    assert_eq!(sel_count(&b, cx), 1);
+    let from = row_pt(&b, 1, "c.txt", cx);
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(9.), from.y), left, Modifiers::none());
+    assert!(cx.update(|_, cx| cx.has_active_drag()));
+    assert_eq!(selected(&b, 1, cx), Some("c.txt".into()));
+    assert_eq!(sel_count(&b, cx), 1);
+    cx.simulate_mouse_up(from, left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[gpui::test]
+fn drop_refused_while_ops_busy(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d, scratch) = (t.path().join("a"), t.path().join("d"), t.path().join("scratch"));
+    for dir in [&a, &d, &scratch] {
+        fs::create_dir(dir).unwrap();
+    }
+    touch(&a, &["x.txt", "y.txt"]);
+    let (b, cx, _state) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(to, left, Modifiers::none());
+    assert!(cx.update(|_, cx| cx.has_active_drag()));
+    // A copy is now in flight (background work only finishes when the executor is parked).
+    let ops = cx.read(|cx| b.read(cx).ops().clone());
+    let req = nanofm::fm_core::ops::OpRequest::Copy { srcs: vec![a.join("y.txt")], dest: scratch.clone() };
+    cx.update(|_, cx| ops.update(cx, |o, cx| o.run(req, None, false, cx)));
+    assert!(cx.read(|cx| ops.read(cx).busy()));
+    cx.simulate_mouse_up(to, left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(names(&a), ["x.txt", "y.txt"]);
+    assert!(names(&d).is_empty());
+    assert_eq!(names(&scratch), ["y.txt"]);
+}
+
+#[gpui::test]
+fn row_drag_blocked_during_rename(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    assert!(renaming(&b, cx).is_some());
+    let from = row_pt(&b, 1, "c.txt", cx);
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(9.), from.y), left, Modifiers::none());
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    cx.simulate_mouse_up(from, left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[gpui::test]
+fn drag_onto_folder_row_moves_into(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("sub")).unwrap();
+    touch(t.path(), &["x.txt"]);
+    let (b, cx) = mount(cx, t.path());
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), row_pt(&b, 1, "sub", cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(t.path()), ["sub"]);
+    assert_eq!(names(&t.path().join("sub")), ["x.txt"]);
+}
+
+#[gpui::test]
+fn drag_folder_onto_itself_refused(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("sub")).unwrap();
+    touch(t.path(), &["x.txt"]);
+    let (b, cx) = mount(cx, t.path());
+    let p = row_pt(&b, 1, "sub", cx);
+    drag(cx, p, gpui::point(p.x + gpui::px(10.), p.y), Modifiers::none());
+    assert_eq!(names(t.path()), ["sub", "x.txt"]);
+    assert!(names(&t.path().join("sub")).is_empty());
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn drag_folder_into_own_subfolder_refused(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, sub) = (t.path().join("a"), t.path().join("a").join("sub"));
+    fs::create_dir_all(&sub).unwrap();
+    touch(&sub, &["inner.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &sub);
+    let (from, to) = (row_pt(&b, 1, "sub", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&a), ["sub"]);
+    assert_eq!(names(&sub), ["inner.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn drop_into_same_folder_is_noop(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    let (from, to) = (row_pt(&b, 1, "a.txt", cx), pane_bg(1, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+    keys(cx, "cmd-z"); // nothing was recorded
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[gpui::test]
+fn drag_conflict_shows_banner(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt"]);
+    touch(&d, &["x.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&a), ["x.txt"]);
+    assert!(banner_of(&b, cx).is_some());
+}
+
+#[gpui::test]
+fn drag_drop_is_undoable(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d) = (t.path().join("a"), t.path().join("d"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d).unwrap();
+    touch(&a, &["x.txt"]);
+    let (b, cx, _s) = two_panes(cx, &a, &d);
+    let (from, to) = (row_pt(&b, 1, "x.txt", cx), pane_bg(2, cx));
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&d), ["x.txt"]);
+    keys(cx, "cmd-z");
+    assert_eq!(names(&a), ["x.txt"]);
+    assert!(names(&d).is_empty());
+    assert_eq!(pane_names(&b, 1, cx), ["x.txt"]);
+    assert!(pane_names(&b, 2, cx).is_empty());
+}
+
+#[gpui::test]
+fn external_filedrop_empty_paths_is_harmless(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (_b, cx) = mount(cx, t.path());
+    let p = pane_bg(1, cx);
+    cx.simulate_event(gpui::FileDropEvent::Entered { position: p, paths: gpui::ExternalPaths::default() });
+    cx.simulate_event(gpui::FileDropEvent::Pending { position: p });
+    cx.simulate_event(gpui::FileDropEvent::Submit { position: p });
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    assert_eq!(names(t.path()), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[gpui::test]
+fn drop_external_seam_copies(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (dest, outside) = (t.path().join("dest"), t.path().join("outside"));
+    fs::create_dir(&dest).unwrap();
+    fs::create_dir(&outside).unwrap();
+    touch(&outside, &["f.txt"]);
+    let (b, cx) = mount(cx, &dest);
+    let list = cx.read(|cx| b.read(cx).active_list(cx));
+    let src = outside.join("f.txt");
+    let started = cx.update(|_, cx| list.update(cx, |l, cx| l.drop_external(std::slice::from_ref(&src), &dest, cx)));
+    cx.run_until_parked();
+    assert!(started);
+    assert_eq!(names(&dest), ["f.txt"]);
+    assert_eq!(names(&outside), ["f.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["f.txt"]);
+}
+
+#[gpui::test]
+fn column_view_drag_onto_left_column_folder_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (sub, other) = (t.path().join("sub"), t.path().join("other"));
+    fs::create_dir(&sub).unwrap();
+    fs::create_dir(&other).unwrap();
+    touch(&sub, &["f.txt", "g.txt"]);
+    let (b, cx) = mount(cx, &sub);
+    keys(cx, "cmd-2");
+    cx.run_until_parked();
+    let from = row_pt(&b, 1, "f.txt", cx);
+    let to = cx.debug_bounds("col-0-other").expect("left column folder row").center();
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&sub), ["g.txt"]);
+    assert_eq!(names(&other), ["f.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["g.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn drag_onto_crumb_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, sub) = (t.path().join("a"), t.path().join("a").join("sub"));
+    fs::create_dir_all(&sub).unwrap();
+    touch(&sub, &["x.txt"]);
+    let (b, cx) = mount_home(cx, t.path(), &sub);
+    let n = cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).crumbs(cx).len());
+    let sel: &'static str = Box::leak(format!("crumb-1-{}", n - 2).into_boxed_str());
+    let from = row_pt(&b, 1, "x.txt", cx);
+    // Selecting the row changes the status text and shifts the crumbs, so aim after the drag starts.
+    drag_to_sel(cx, from, sel, 0., Modifiers::none());
+    assert_eq!(names(&a), ["sub", "x.txt"]);
+    assert!(names(&sub).is_empty());
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+/// Browser at `dir` with the given sidebar entries seeded in a tempdir state store (also its home).
+fn with_sidebar<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &Path,
+    favs: &[&Path],
+    pins: &[&Path],
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), favs, pins, leaf_snap(&[dir], 0));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, vcx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    (b, vcx, state)
+}
+
+fn fav_paths(b: &gpui::Entity<Browser>, cx: &mut VisualTestContext) -> Vec<PathBuf> {
+    cx.read(|cx| b.read(cx).favorites().iter().map(|e| e.path.clone()).collect())
+}
+
+fn flush_save(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+}
+
+fn bounds_of(cx: &mut VisualTestContext, sel: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds(sel).unwrap_or_else(|| panic!("{sel} not laid out"))
+}
+
+/// Drags the row `from` to the element `sel`, which may only appear once the drag is under way.
+fn drag_to_sel(cx: &mut VisualTestContext, from: gpui::Point<gpui::Pixels>, sel: &'static str, dy: f32, mods: Modifiers) {
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(5.), from.y), left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(6.), from.y), left, Modifiers::none());
+    cx.run_until_parked();
+    let r = bounds_of(cx, sel);
+    let to = gpui::point(r.center().x, r.center().y + gpui::px(dy));
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_move(to, left, mods);
+    cx.simulate_mouse_up(to, left, mods);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn drag_onto_sidebar_folder_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, fav) = (t.path().join("a"), t.path().join("fav"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&fav).unwrap();
+    touch(&a, &["x.txt", "y.txt"]);
+    let (b, cx, _s) = with_sidebar(cx, &a, &[&fav], &[]);
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "place-fav-0", 0., Modifiers::none());
+    assert_eq!(names(&a), ["y.txt"]);
+    assert_eq!(names(&fav), ["x.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["y.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn drag_folder_onto_pinned_heading_pins_with_no_pins_and_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    let (b, cx, state) = with_sidebar(cx, &a, &[], &[]);
+    assert!(cx.debug_bounds("sidebar-heading-pinned").is_none(), "no Pinned heading without pins or a drag");
+    let from = row_pt(&b, 1, "sub", cx);
+    drag_to_sel(cx, from, "sidebar-heading-pinned", 0., Modifiers::none());
+    assert_eq!(pinned_paths(&b, cx), [canon(&a.join("sub"))]);
+    assert!(cx.debug_bounds("place-pinned-0").is_some());
+    assert_eq!(names(&a), ["sub"]); // nothing moved
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.pinned.iter().map(|e| e.path.clone()).collect::<Vec<_>>(), [canon(&a.join("sub"))]);
+}
+
+#[gpui::test]
+fn drag_file_onto_heading_refused(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    touch(&a, &["x.txt"]);
+    let (b, cx, _s) = with_sidebar(cx, &a, &[], &[]);
+    // A file alone, then a file together with a folder: both refused, on both headings.
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-favorites", 0., Modifiers::none());
+    assert!(fav_paths(&b, cx).is_empty());
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-pinned", 0., Modifiers::none());
+    assert!(pinned_paths(&b, cx).is_empty());
+    keys(cx, "cmd-a");
+    let from = row_pt(&b, 1, "x.txt", cx);
+    drag_to_sel(cx, from, "sidebar-heading-favorites", 0., Modifiers::none());
+    assert!(fav_paths(&b, cx).is_empty());
+    assert_eq!(names(&a), ["sub", "x.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}
+
+#[gpui::test]
+fn reorder_favorites_by_drag_persists(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    let (f1, f2, f3) = (t.path().join("f1"), t.path().join("f2"), t.path().join("f3"));
+    for d in [&a, &f1, &f2, &f3] {
+        fs::create_dir(d).unwrap();
+    }
+    let (b, cx, state) = with_sidebar(cx, &a, &[&f1, &f2, &f3], &[]);
+    let from = bounds_of(cx, "place-fav-0").center();
+    // Lower half of the last favorite: the slot after it.
+    drag_to_sel(cx, from, "place-fav-2", 5., Modifiers::none());
+    assert_eq!(fav_paths(&b, cx), [f2.clone(), f3.clone(), f1.clone()]);
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.favorites.iter().map(|e| e.path.clone()).collect::<Vec<_>>(), [f2, f3, f1]);
+}
+
+#[gpui::test]
+fn drag_pinned_into_favorites(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    let (f1, p1) = (t.path().join("f1"), t.path().join("p1"));
+    for d in [&a, &f1, &p1] {
+        fs::create_dir(d).unwrap();
+    }
+    let (b, cx, _s) = with_sidebar(cx, &a, &[&f1], &[&p1]);
+    let from = bounds_of(cx, "place-pinned-0").center();
+    // Upper half of the first favorite: the slot before it.
+    drag_to_sel(cx, from, "place-fav-0", -5., Modifiers::none());
+    assert_eq!(fav_paths(&b, cx), [p1, f1]);
+    assert!(pinned_paths(&b, cx).is_empty());
+}
+
+#[gpui::test]
+fn drag_tab_reorders_keeps_active(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d1, c) = (t.path().join("a"), t.path().join("b"), t.path().join("c"));
+    for d in [&a, &d1, &c] {
+        fs::create_dir(d).unwrap();
+    }
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[&a, &d1, &c], 1));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    assert_eq!(tab_dirs(&b, 1, cx), [a.clone(), d1.clone(), c.clone()]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-2").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [d1.clone(), c.clone(), a.clone()]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 0)); // still the "b" tab
+    assert_eq!(dir_of(&b, cx), d1);
+    flush_save(cx);
+    let saved = StateStore::new(state.path()).load();
+    assert_eq!(saved.layout.leaves()[0].tabs, [d1.clone(), c.clone(), a.clone()]);
+    assert_eq!(saved.layout.leaves()[0].active, 0);
+    // Dragging the active tab right: it follows.
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-1").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [c, d1.clone(), a]);
+    assert_eq!(tab_state(&b, 1, cx), (3, 1));
+    assert_eq!(dir_of(&b, cx), d1);
+}
+
+#[gpui::test]
+fn drag_tab_refused_while_renaming(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (a, d1) = (t.path().join("a"), t.path().join("b"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&d1).unwrap();
+    touch(&a, &["x.txt"]);
+    let state = tempfile::tempdir().unwrap();
+    seed(state.path(), &[], &[], leaf_snap(&[&a, &d1], 0));
+    let (sd, home) = (state.path().to_path_buf(), state.path().to_path_buf());
+    let (b, cx) = mount_opts(cx, move || BrowserOptions {
+        store: Some(StateStore::new(sd)),
+        places: Places::rooted(home),
+        ..Default::default()
+    });
+    keys(cx, "down enter");
+    assert!(renaming(&b, cx).is_some());
+    let (from, to) = (bounds_of(cx, "tab-1-0").center(), bounds_of(cx, "tab-1-1").center());
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(tab_dirs(&b, 1, cx), [a, d1]);
+}
+
+// ---- Phase 6: Inspector --------------------------------------------------------------------
+
+const PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41,
+    0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00, 0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// Mounts with `home` as the (rooted) home and `start` as the first folder.
+fn mount_ins<'a>(
+    cx: &'a mut TestAppContext,
+    start: &Path,
+    home: &Path,
+    rec: &RevealRecorder,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, op, home) = (start.to_path_buf(), rec.clone(), home.to_path_buf());
+    mount_opts(cx, move || BrowserOptions {
+        start: Some(start),
+        opener: Rc::new(op),
+        places: Places::rooted(home),
+        ..Default::default()
+    })
+}
+
+fn ins_visible(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).pane(PaneId(pane)).unwrap().read(cx).inspector_visible())
+}
+
+fn ins<R>(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext, f: impl FnOnce(&nanofm::ui::inspector::Inspector) -> R) -> R {
+    cx.read(|cx| {
+        let i = b.read(cx).pane(PaneId(pane)).unwrap().read(cx).inspector().clone();
+        f(i.read(cx))
+    })
+}
+
+fn row(rows: &[(String, String)], k: &str) -> Option<String> {
+    rows.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+}
+
+#[gpui::test]
+fn alt_cmd_i_toggles_inspector_per_pane(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-d");
+    assert_eq!(cx.read(|cx| b.read(cx).focused()), PaneId(2));
+    assert!(!ins_visible(&b, 1, cx) && !ins_visible(&b, 2, cx));
+    keys(cx, "alt-cmd-i");
+    assert!(ins_visible(&b, 2, cx));
+    assert!(!ins_visible(&b, 1, cx));
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 2, cx));
+}
+
+#[gpui::test]
+fn alt_cmd_i_in_rename_types_nothing(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 1, cx));
+    assert_eq!(renaming(&b, cx), Some(("a.txt".into(), 0..1)));
+}
+
+#[gpui::test]
+fn inspector_no_selection_placeholder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), Some("No Selection".into()));
+}
+
+#[gpui::test]
+fn inspector_multi_selection_count(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down shift-down");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), Some("2 Items Selected".into()));
+}
+
+#[gpui::test]
+fn inspector_file_details(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let docs = t.path().join("docs");
+    fs::create_dir(&docs).unwrap();
+    fs::write(docs.join("hello.txt"), "12345").unwrap();
+    let (b, cx) = mount_ins(cx, &docs, t.path(), &RevealRecorder::default());
+    keys(cx, "alt-cmd-i down");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), None);
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()), Some(("hello.txt".into(), "~/docs".into())));
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Size").as_deref(), Some("5 bytes"));
+    assert!(!row(&rows, "Kind").unwrap().is_empty());
+    assert_ne!(row(&rows, "Created").unwrap(), "--");
+    assert_ne!(row(&rows, "Modified").unwrap(), "--");
+    assert!(row(&rows, "Resolution").is_none());
+}
+
+#[gpui::test]
+fn inspector_folder_size_dashes(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("sub")).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Size").as_deref(), Some("--"));
+    assert!(!ins(&b, 1, cx, |i| i.shows_image()));
+}
+
+#[gpui::test]
+fn inspector_png_resolution(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("p.png"), PNG_1X1).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Resolution").as_deref(), Some("1 \u{d7} 1"));
+    assert!(ins(&b, 1, cx, |i| i.shows_image()));
+}
+
+#[gpui::test]
+fn inspector_follows_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "a.txt");
+    keys(cx, "down");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "b.txt");
+    // Opening it later shows the current selection at once.
+    keys(cx, "alt-cmd-i alt-cmd-i");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "b.txt");
+}
+
+#[gpui::test]
+fn inspector_buttons_open_reveal_path(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_ins(cx, t.path(), t.path(), &rec);
+    keys(cx, "alt-cmd-i down");
+    let a = t.path().join("a.txt");
+    for id in ["inspector-open", "inspector-reveal", "inspector-path"] {
+        let c = bounds_of(cx, id).center();
+        cx.simulate_click(c, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert_eq!(rec.opened.borrow().as_slice(), std::slice::from_ref(&a));
+    assert_eq!(*rec.revealed.borrow(), [vec![a.clone()]]);
+    assert_eq!(clipboard_text(cx), Some(a.display().to_string()));
+}
+
+#[gpui::test]
+fn inspector_column_mode_trailing_column(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2 alt-cmd-i down");
+    assert!(cx.debug_bounds("inspector-col").is_some());
+    assert!(cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().unwrap().read(cx).has_inspector()));
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "a.txt");
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 1, cx));
+    let shown = cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().unwrap().read(cx).has_inspector());
+    assert!(!shown);
+}
+
+// ---- icons ---------------------------------------------------------------------------------------
+
+use nanofm::fm_core::icons::IconKey;
+use nanofm::ui::icons::IconSource;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+struct FakeIcons(Arc<Mutex<Vec<PathBuf>>>, Option<Vec<u8>>);
+
+impl IconSource for FakeIcons {
+    fn icon_png(&self, path: &Path, _px: u32) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().push(path.to_path_buf());
+        self.1.clone()
+    }
+    fn generic_png(&self, folder: bool, _px: u32) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().push(PathBuf::from(if folder { "<generic-folder>" } else { "<generic-plain>" }));
+        self.1.clone()
+    }
+}
+
+fn mount_icons<'a>(cx: &'a mut TestAppContext, dir: &Path, fake: &FakeIcons) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, f) = (dir.to_path_buf(), fake.clone());
+    mount_opts(cx, move || BrowserOptions { start: Some(start), icons: Rc::new(f), ..Default::default() })
+}
+
+fn icon_dir() -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    for f in ["a.txt", "b.txt", "c.md"] {
+        fs::write(t.path().join(f), "x").unwrap();
+    }
+    for d in ["sub1", "sub2"] {
+        fs::create_dir(t.path().join(d)).unwrap();
+    }
+    t
+}
+
+#[gpui::test]
+fn icons_fetched_once_per_kind(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), Some(PNG_1X1.to_vec()));
+    let (_b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    let calls = fake.0.lock().unwrap().clone();
+    let ext = |e: &str| calls.iter().filter(|p| p.extension().is_some_and(|x| x == e)).count();
+    assert_eq!((ext("txt"), ext("md")), (1, 1));
+    // Home, the root and volumes are their own kinds (per path); every other folder shares one.
+    let home = nanofm::fm_core::places::home_dir();
+    let shared = |p: &&PathBuf| p.is_dir() && **p != home && p.parent().is_some_and(|q| q != Path::new("/Volumes"));
+    // ...and that kind comes from the generic source, never from whichever folder was seen first.
+    assert_eq!(calls.iter().filter(shared).count(), 0, "{calls:?}");
+    let generic = |n: &str| calls.iter().filter(|p| p.as_path() == Path::new(n)).count();
+    assert_eq!((generic("<generic-folder>"), generic("<generic-plain>")), (1, 0), "{calls:?}");
+}
+
+#[gpui::test]
+fn missing_icon_not_retried(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), None);
+    let (b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    let n = fake.0.lock().unwrap().len();
+    assert!(n > 0);
+    assert!(cx.read(|cx| b.read(cx).icons().read(cx).is_missing(&IconKey::Ext("txt".into()), 16)));
+    keys(cx, "down down");
+    cx.run_until_parked();
+    assert_eq!(fake.0.lock().unwrap().len(), n);
+}
+
+#[gpui::test]
+fn icons_render_with_valid_png(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), Some(PNG_1X1.to_vec()));
+    let (b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    keys(cx, "alt-cmd-i down");
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let c = b.read(cx).icons().read(cx);
+        assert!(c.is_ready(&IconKey::Ext("txt".into()), 16));
+        assert!(c.is_ready(&IconKey::Folder, 16));
+        assert!(c.is_ready(&IconKey::Folder, 128)); // the inspector's large icon (first row is a folder)
+    });
 }

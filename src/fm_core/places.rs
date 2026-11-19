@@ -183,6 +183,63 @@ pub fn add_favorite(list: &mut Vec<SidebarEntry>, path: &Path) {
     list.push(SidebarEntry { path: c, title: None });
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Favorites,
+    Pinned,
+}
+
+/// Moves an entry within or between the two lists. `to.1` is an insertion slot in the destination
+/// list as it was before the move (Swift adjusts it down by one when moving forward in the same list).
+/// Returns false (and changes nothing) when `from` is out of range or the move lands back on its own slot.
+pub fn move_entry(
+    favs: &mut Vec<SidebarEntry>,
+    pins: &mut Vec<SidebarEntry>,
+    from: (Section, usize),
+    to: (Section, usize),
+) -> bool {
+    let src = match from.0 {
+        Section::Favorites => &*favs,
+        Section::Pinned => &*pins,
+    };
+    if from.1 >= src.len() {
+        return false;
+    }
+    if from.0 == to.0 && (to.1 == from.1 || to.1 == from.1 + 1) {
+        return false;
+    }
+    let entry = match from.0 {
+        Section::Favorites => favs.remove(from.1),
+        Section::Pinned => pins.remove(from.1),
+    };
+    let mut at = to.1;
+    if from.0 == to.0 && from.1 < at {
+        at -= 1;
+    }
+    let dst = match to.0 {
+        Section::Favorites => favs,
+        Section::Pinned => pins,
+    };
+    dst.insert(at.min(dst.len()), entry);
+    true
+}
+
+/// Adds each folder to `list` (pinned: deduped, appended; favorites: moved to the end).
+/// Returns whether anything changed.
+pub fn add_folders(list: &mut Vec<SidebarEntry>, paths: &[PathBuf], section: Section) -> bool {
+    let mut changed = false;
+    for p in paths {
+        match section {
+            Section::Pinned => changed |= pin(list, p),
+            Section::Favorites => {
+                add_favorite(list, p);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn remove(list: &mut Vec<SidebarEntry>, ix: usize) -> Option<SidebarEntry> {
     (ix < list.len()).then(|| list.remove(ix))
 }
@@ -332,5 +389,69 @@ mod tests {
         let p = Places::rooted("/r");
         assert_eq!(p.downloads, Path::new("/r/Downloads"));
         assert_eq!(p.applications, Path::new("/r/Applications"));
+    }
+
+    fn ents(names: &[&str]) -> Vec<SidebarEntry> {
+        names.iter().map(|n| SidebarEntry { path: PathBuf::from(format!("/{n}")), title: None }).collect()
+    }
+    fn names(l: &[SidebarEntry]) -> Vec<String> {
+        l.iter().map(|e| e.path.display().to_string()[1..].to_string()).collect()
+    }
+
+    #[test]
+    fn move_within_forward() {
+        let (mut f, mut p) = (ents(&["a", "b", "c"]), ents(&[]));
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Favorites, 2)));
+        assert_eq!(names(&f), ["b", "a", "c"]);
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Favorites, 3)));
+        assert_eq!(names(&f), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn move_within_back() {
+        let (mut f, mut p) = (ents(&["a", "b", "c"]), ents(&[]));
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 2), (Section::Favorites, 0)));
+        assert_eq!(names(&f), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn move_between_groups() {
+        let (mut f, mut p) = (ents(&["a", "b"]), ents(&["x"]));
+        assert!(move_entry(&mut f, &mut p, (Section::Pinned, 0), (Section::Favorites, 1)));
+        assert_eq!(names(&f), ["a", "x", "b"]);
+        assert!(p.is_empty());
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Pinned, 99)));
+        assert_eq!(names(&p), ["a"]);
+    }
+
+    #[test]
+    fn move_onto_own_slot_is_noop() {
+        let (mut f, mut p) = (ents(&["a", "b", "c"]), ents(&[]));
+        assert!(!move_entry(&mut f, &mut p, (Section::Favorites, 1), (Section::Favorites, 1)));
+        assert!(!move_entry(&mut f, &mut p, (Section::Favorites, 1), (Section::Favorites, 2)));
+        assert_eq!(names(&f), ["a", "b", "c"]);
+        let (mut f, mut p) = (ents(&["a"]), ents(&["x"]));
+        assert!(move_entry(&mut f, &mut p, (Section::Favorites, 0), (Section::Pinned, 0)));
+    }
+
+    #[test]
+    fn move_out_of_range_noop() {
+        let (mut f, mut p) = (ents(&["a"]), ents(&["x"]));
+        assert!(!move_entry(&mut f, &mut p, (Section::Favorites, 1), (Section::Pinned, 0)));
+        assert!(!move_entry(&mut f, &mut p, (Section::Pinned, 5), (Section::Favorites, 0)));
+        assert_eq!(names(&f), ["a"]);
+        assert_eq!(names(&p), ["x"]);
+    }
+
+    #[test]
+    fn add_folders_dedupes() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let mut l = Vec::new();
+        assert!(add_folders(&mut l, &[a.clone(), b.clone()], Section::Pinned));
+        assert!(!add_folders(&mut l, &[a], Section::Pinned));
+        assert_eq!(l.len(), 2);
     }
 }

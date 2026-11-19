@@ -51,6 +51,7 @@ pub fn all() -> Vec<CommandDef> {
         cmd!("file.reveal", "Reveal in Finder", "File", "", RevealInFinder),
         cmd!("file.copyPath", "Copy Path", "File", "\u{2325}\u{2318}C", CopyPath),
         cmd!("view.sidebar", "Toggle Sidebar", "View", "\u{2303}\u{2318}S", ToggleSidebar),
+        cmd!("view.inspector", "Toggle Inspector", "View", "\u{2325}\u{2318}I", ToggleInspector),
         cmd!("view.hidden", "Show Hidden Files", "View", "\u{21E7}\u{2318}.", ToggleHidden),
         cmd!("view.list", "as List", "View", "\u{2318}1", ViewList),
         cmd!("view.column", "as Columns", "View", "\u{2318}2", ViewColumn),

@@ -8,15 +8,19 @@ use crate::fm_core::state::{PaneSnapshot, ViewMode};
 use crate::fm_core::tabs::Tabs;
 use crate::ui::actions::FilterDown;
 use crate::ui::column_view::ColumnView;
+use crate::ui::dnd::{DragPreview, DraggedFiles, DraggedTab};
 use crate::ui::file_list::{FileList, FileListEvent};
+use crate::ui::icons::{IconCache, icon_el};
+use crate::ui::inspector::Inspector;
 use crate::ui::opener::Opener;
 use crate::ui::ops::FileOps;
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseDownEvent, Render, Subscription, Window, div, prelude::*, px, rgb,
 };
+use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -36,6 +40,8 @@ pub enum PaneEvent {
     Changed,
     /// The active tab's selection changed.
     SelectionChanged,
+    /// The inspector was shown or hidden.
+    InspectorChanged,
 }
 
 struct FilterBox {
@@ -62,6 +68,10 @@ pub struct Pane {
     show_hidden: bool,
     filter: Option<FilterBox>,
     columns: Option<Entity<ColumnView>>,
+    /// Per pane and not persisted.
+    inspector: Entity<Inspector>,
+    inspector_visible: bool,
+    icons: Entity<IconCache>,
     focus_filter_pending: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -86,10 +96,13 @@ impl Pane {
         show_hidden: bool,
         sort: SortOrder,
         view_mode: ViewMode,
+        icons: Entity<IconCache>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = Self::make_tab(start, &ops, &opener, show_hidden, sort, view_mode == ViewMode::Column, cx);
+        let first = Self::make_tab(id.0, start, &ops, &opener, &icons, show_hidden, sort, view_mode == ViewMode::Column, cx);
         let busy = cx.observe(&ops, |_, _, cx| cx.notify());
+        let icons_sub = cx.observe(&icons, |_, _, cx| cx.notify());
+        let inspector = cx.new(|cx| Inspector::new(home.clone(), opener.clone(), icons.clone(), cx));
         Self {
             id,
             tabs: Tabs::new(first),
@@ -101,16 +114,22 @@ impl Pane {
             show_hidden,
             filter: None,
             columns: None,
+            inspector,
+            inspector_visible: false,
+            icons,
             focus_filter_pending: false,
             focus: cx.focus_handle(),
-            _subs: vec![busy],
+            _subs: vec![busy, icons_sub],
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_tab(
+        pane: u64,
         start: PathBuf,
         ops: &Entity<FileOps>,
         opener: &Rc<dyn Opener>,
+        icons: &Entity<IconCache>,
         show_hidden: bool,
         sort: SortOrder,
         compact: bool,
@@ -119,11 +138,14 @@ impl Pane {
         let list = cx.new(|cx| {
             let mut l = FileList::new(start, ops.clone(), opener.clone(), show_hidden, sort, cx);
             l.set_compact_initial(compact);
+            l.set_pane_tag(pane);
+            l.set_icons(icons.clone(), cx);
             l
         });
         let sub = cx.subscribe(&list, |this, l, ev: &FileListEvent, cx| match ev {
             FileListEvent::Navigated(p) => {
                 if l.entity_id() == this.active_list().entity_id() {
+                    this.push_inspector_selection(cx);
                     this.clear_filter(cx);
                     cx.emit(PaneEvent::ActiveDirChanged(p.clone()));
                 }
@@ -133,6 +155,7 @@ impl Pane {
             FileListEvent::SortRequested(key) => this.request_sort(*key, cx),
             FileListEvent::SelectionChanged => {
                 if l.entity_id() == this.active_list().entity_id() {
+                    this.push_inspector_selection(cx);
                     cx.emit(PaneEvent::SelectionChanged);
                 }
             }
@@ -147,7 +170,7 @@ impl Pane {
     pub fn restore_tabs(&mut self, snap: &PaneSnapshot, cx: &mut Context<Self>) {
         for dir in snap.tabs.iter().skip(1) {
             let compact = self.view_mode == ViewMode::Column;
-            let tab = Self::make_tab(dir.clone(), &self.ops, &self.opener, self.show_hidden, self.sort, compact, cx);
+            let tab = Self::make_tab(self.id.0, dir.clone(), &self.ops, &self.opener, &self.icons, self.show_hidden, self.sort, compact, cx);
             self.tabs.add_after_active(tab);
         }
         self.tabs.select(snap.active);
@@ -231,6 +254,7 @@ impl Pane {
     pub fn clear_filter(&mut self, cx: &mut Context<Self>) {
         if self.filter.take().is_some() {
             self.apply_filter(cx);
+        self.push_inspector_selection(cx);
             cx.notify();
         }
     }
@@ -247,6 +271,44 @@ impl Pane {
             let list = self.active_list().clone();
             c.update(cx, |c, cx| c.set_list(list, cx));
         }
+    }
+
+    // ---- inspector ---------------------------------------------------------------------------
+
+    pub fn inspector_visible(&self) -> bool {
+        self.inspector_visible
+    }
+
+    pub fn inspector(&self) -> &Entity<Inspector> {
+        &self.inspector
+    }
+
+    pub fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        if self.active_renaming(cx) {
+            return;
+        }
+        self.inspector_visible = !self.inspector_visible;
+        self.sync_inspector(cx);
+        cx.emit(PaneEvent::InspectorChanged);
+        cx.notify();
+    }
+
+    /// While visible the inspector follows the active tab's selection.
+    fn push_inspector_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.inspector_visible {
+            return;
+        }
+        let sel = self.active_list().read(cx).selection_paths();
+        self.inspector.update(cx, |i, cx| i.set_selection(sel, cx));
+    }
+
+    /// Hands the inspector to the column view (column mode) and shows the current selection.
+    fn sync_inspector(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = &self.columns {
+            let ins = self.inspector_visible.then(|| self.inspector.clone());
+            c.update(cx, |c, cx| c.set_inspector(ins, cx));
+        }
+        self.push_inspector_selection(cx);
     }
 
     // ---- view mode ---------------------------------------------------------------------------
@@ -277,7 +339,13 @@ impl Pane {
             self.columns = None;
         } else if self.columns.is_none() {
             let (list, sort, hidden, opener) = (self.active_list().clone(), self.sort, self.show_hidden, self.opener.clone());
-            self.columns = Some(cx.new(|cx| ColumnView::new(list, sort, hidden, opener, cx)));
+            let icons = self.icons.clone();
+            self.columns = Some(cx.new(|cx| {
+                let mut c = ColumnView::new(list, sort, hidden, opener, cx);
+                c.set_icons(icons, cx);
+                c
+            }));
+            self.sync_inspector(cx);
         }
     }
 
@@ -307,6 +375,7 @@ impl Pane {
         };
         let pane = self.id.0;
         let trail = crumbs(&dir, &self.home);
+        let list = self.active_list().clone();
         let last = trail.len() - 1;
         let mut bar = div()
             .flex()
@@ -327,6 +396,7 @@ impl Pane {
                 crumbs_row = crumbs_row.child(div().flex_none().text_color(rgb(theme::TEXT_DIM)).child("\u{203A}"));
             }
             let title = crumb_title(&p, &self.home);
+            let crumb_icon = icon_el(Some(&self.icons), &p, true, false, 16., cx);
             crumbs_row = crumbs_row.child(
                 div()
                     .id(("crumb", i))
@@ -337,7 +407,32 @@ impl Pane {
                     .cursor_pointer()
                     .text_color(rgb(if i == last { theme::TEXT } else { theme::TEXT_DIM }))
                     .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(crumb_icon)
                     .child(title)
+                    .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .can_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |payload: &dyn Any, window: &mut Window, cx: &mut App| {
+                            list.read(cx).accepts_drop(payload, &dest, window.modifiers().alt, cx)
+                        }
+                    })
+                    .on_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |f: &DraggedFiles, window: &mut Window, cx: &mut App| {
+                            let (paths, alt) = (f.paths.clone(), window.modifiers().alt);
+                            list.update(cx, |l, cx| l.drop_files(&paths, &dest, alt, cx));
+                        }
+                    })
+                    .on_drop({
+                        let (list, dest) = (list.clone(), p.clone());
+                        move |e: &ExternalPaths, _: &mut Window, cx: &mut App| {
+                            list.update(cx, |l, cx| l.drop_external(e.paths(), &dest, cx));
+                        }
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_list().update(cx, |l, cx| l.navigate(p.clone(), None, cx));
                         cx.emit(PaneEvent::Refocus);
@@ -385,9 +480,10 @@ impl Pane {
             let l = self.active_list().read(cx);
             (l.current_dir().to_path_buf(), l.show_hidden())
         };
-        let tab = Self::make_tab(dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, &self.icons, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -397,12 +493,13 @@ impl Pane {
     /// active tab stays where it is. Adding several background tabs in reverse keeps their order.
     pub fn add_tab(&mut self, dir: PathBuf, activate: bool, cx: &mut Context<Self>) {
         let (hidden, prev) = (self.show_hidden, self.tabs.active());
-        let tab = Self::make_tab(dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, &self.icons, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         if !activate {
             self.tabs.select(prev);
         }
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         if activate {
             cx.emit(PaneEvent::Refocus);
@@ -421,6 +518,7 @@ impl Pane {
         }
         self.tabs.close(ix);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -437,6 +535,19 @@ impl Pane {
         }
         self.tabs.select(ix);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
+        cx.emit(PaneEvent::Changed);
+        cx.emit(PaneEvent::Refocus);
+        cx.notify();
+    }
+
+    /// Moves tab `from` to position `to` (same pane); the active tab stays the same item.
+    /// Refused while a rename is in progress.
+    pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if self.active_renaming(cx) || from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        self.tabs.move_tab(from, to);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -448,6 +559,7 @@ impl Pane {
         }
         self.tabs.cycle(delta);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -504,11 +616,21 @@ impl Pane {
         for (ix, t) in self.tabs.items().iter().enumerate() {
             let is_active = ix == active;
             let title = t.list.read(cx).title();
+            let tab_dir = t.list.read(cx).current_dir().to_path_buf();
+            let tab_icon = icon_el(Some(&self.icons), &tab_dir, true, false, 16., cx);
+            let drag_title = title.clone();
+            let weak = cx.entity().downgrade();
             strip = strip.child(
                 div()
                     .flex()
                     .items_center()
                     .flex_none()
+                    .drag_over::<DraggedTab>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
+                    .can_drop(move |payload: &dyn Any, _: &mut Window, cx: &mut App| {
+                        let Some(d) = payload.downcast_ref::<DraggedTab>() else { return false };
+                        d.pane.0 == pane && d.ix != ix && weak.read_with(cx, |p, cx| !p.active_renaming(cx)).unwrap_or(false)
+                    })
+                    .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| this.move_tab(d.ix, ix, cx)))
                     .max_w(px(180.))
                     .rounded_md()
                     .text_sm()
@@ -522,11 +644,16 @@ impl Pane {
                             .py_0p5()
                             .min_w_0()
                             .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .cursor_pointer()
                             .hover(|d| d.bg(rgb(theme::HOVER_BG)))
-                            .child(title)
+                            .child(tab_icon)
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                            .on_drag(DraggedTab { pane: self.id, ix }, move |_, _, _, cx| {
+                                cx.new(|_| DragPreview::new(drag_title.clone()))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.select_tab(ix, cx))),
                     )
                     .when(!single, |d| {
@@ -624,6 +751,19 @@ impl Render for Pane {
                         .child("Working\u{2026}"),
                 )
             })
+            .child(
+                div()
+                    .id("inspector-toggle")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(if self.inspector_visible { theme::ACCENT } else { theme::TEXT }))
+                    .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+                    .child("\u{24D8}")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx))),
+            )
             .child(self.button(
                 "hidden",
                 if hidden { "Hide Hidden" } else { "Show Hidden" },
@@ -651,6 +791,15 @@ impl Render for Pane {
             .child(toolbar)
             .child(match self.columns.clone() {
                 Some(c) => c.into_any_element(),
+                None if self.inspector_visible => div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(div().flex_1().min_w_0().h_full().child(list))
+                    .child(div().w(px(260.)).flex_none().h_full().border_l_1().border_color(rgb(theme::BORDER)).child(self.inspector.clone()))
+                    .into_any_element(),
                 None => list.into_any_element(),
             })
             .child(self.path_bar(cx))
