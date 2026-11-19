@@ -216,6 +216,11 @@ impl FileList {
         self.can_act() && dnd::perform(&self.ops, paths, dest, alt, DragSource::Internal, cx)
     }
 
+    /// Whether `payload` could be dropped onto folder `dest` right now (lexical; runs at paint).
+    pub fn accepts_drop(&self, payload: &dyn Any, dest: &Path, alt: bool, cx: &App) -> bool {
+        self.can_act() && dnd::accepts(payload, dest, alt, self.ops.read(cx).busy())
+    }
+
     /// Drops files from outside the app (Finder): always a copy.
     pub fn drop_external(&mut self, paths: &[PathBuf], dest: &Path, cx: &mut Context<Self>) -> bool {
         self.can_act() && dnd::perform(&self.ops, paths, dest, false, DragSource::External, cx)

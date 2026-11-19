@@ -1960,3 +1960,22 @@ fn drop_external_seam_copies(cx: &mut TestAppContext) {
     assert_eq!(names(&outside), ["f.txt"]);
     assert_eq!(pane_names(&b, 1, cx), ["f.txt"]);
 }
+
+#[gpui::test]
+fn column_view_drag_onto_left_column_folder_moves(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let (sub, other) = (t.path().join("sub"), t.path().join("other"));
+    fs::create_dir(&sub).unwrap();
+    fs::create_dir(&other).unwrap();
+    touch(&sub, &["f.txt", "g.txt"]);
+    let (b, cx) = mount(cx, &sub);
+    keys(cx, "cmd-2");
+    cx.run_until_parked();
+    let from = row_pt(&b, 1, "f.txt", cx);
+    let to = cx.debug_bounds("col-0-other").expect("left column folder row").center();
+    drag(cx, from, to, Modifiers::none());
+    assert_eq!(names(&sub), ["g.txt"]);
+    assert_eq!(names(&other), ["f.txt"]);
+    assert_eq!(pane_names(&b, 1, cx), ["g.txt"]);
+    assert_eq!(banner_of(&b, cx), None);
+}

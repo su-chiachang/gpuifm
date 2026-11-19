@@ -6,6 +6,7 @@
 //! without recording history.
 
 use crate::fm_core::entry::FileEntry;
+use crate::ui::dnd::{DragPreview, DraggedFiles};
 use crate::fm_core::history::parent_of;
 use crate::fm_core::listing::list_dir;
 use crate::fm_core::sort::{SortOrder, sort_entries};
@@ -13,10 +14,11 @@ use crate::ui::file_list::{FileList, FileListEvent};
 use crate::ui::opener::Opener;
 use crate::ui::theme;
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement, Render, ScrollHandle, Subscription, Window, div,
+    AnyElement, App, ClickEvent, Context, Entity, ExternalPaths, Focusable, IntoElement, Render, ScrollHandle, Subscription, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
-use std::path::PathBuf;
+use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 const COL_W: f32 = 220.;
@@ -256,6 +258,10 @@ impl ColumnView {
             }
             Kind::Preview => (usize::MAX, self.preview.as_ref().map_or(0, |c| c.entries.len()), None),
         };
+        let col_dir = match kind {
+            Kind::Left(i) => self.lefts[i].dir.clone(),
+            Kind::Preview => self.preview.as_ref().map(|c| c.dir.clone()).unwrap_or_default(),
+        };
         let list = uniform_list(
             ("column", tag),
             count,
@@ -269,6 +275,8 @@ impl ColumnView {
                     .filter_map(|ix| col.entries.get(ix).map(|e| (ix, e)))
                     .map(|(ix, e)| {
                         let is_sel = selected.as_deref() == Some(e.path.as_path());
+                        let (is_dir, dest) = (e.is_dir, e.path.clone());
+                        let drag = DraggedFiles::new(vec![e.path.clone()]);
                         div()
                             .id(ix)
                             .debug_selector({
@@ -288,13 +296,38 @@ impl ColumnView {
                             .when(is_sel, |d| d.bg(rgb(theme::SIDEBAR_ACTIVE_BG)))
                             .when(!is_sel, |d| d.hover(|d| d.bg(rgb(theme::HOVER_BG))))
                             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(kind, ix, ev, window, cx)))
+                            .on_drag(drag, |dragged, _, _, cx| cx.new(|_| DragPreview::for_paths(&dragged.paths)))
+                            .when(is_dir, |d| Self::drop_target(d, dest, cx, theme::DROP_BG))
                             .child(if e.is_dir { format!("\u{25B8} {}", e.name) } else { format!("  {}", e.name) })
                     })
                     .collect()
             }),
         )
         .size_full();
-        div().w(px(COL_W)).h_full().flex_none().border_r_1().border_color(rgb(theme::BORDER)).child(list).into_any_element()
+        let wrap = div().w(px(COL_W)).h_full().flex_none().border_r_1().border_color(rgb(theme::BORDER));
+        Self::drop_target(wrap, col_dir, cx, theme::DROP_BG).child(list).into_any_element()
+    }
+
+    /// Makes `el` a drop target onto folder `dest` (internal and Finder drops).
+    fn drop_target<E: InteractiveElement + 'static>(el: E, dest: PathBuf, cx: &mut Context<Self>, bg: u32) -> E {
+        let weak = cx.entity().downgrade();
+        let pred_dest = dest.clone();
+        let (dest_int, dest_ext) = (dest.clone(), dest);
+        el.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(rgb(bg)))
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(rgb(bg)))
+            .can_drop(move |payload: &dyn Any, window: &mut Window, cx: &mut App| {
+                let alt = window.modifiers().alt;
+                weak.read_with(cx, |this, cx| this.list.read(cx).accepts_drop(payload, &pred_dest, alt, cx)).unwrap_or(false)
+            })
+            .on_drop(cx.listener(move |this, f: &DraggedFiles, window, cx| {
+                let alt = window.modifiers().alt;
+                let paths = f.paths.clone();
+                let dest: &Path = &dest_int;
+                this.list.update(cx, |l, cx| l.drop_files(&paths, dest, alt, cx));
+            }))
+            .on_drop(cx.listener(move |this, e: &ExternalPaths, _, cx| {
+                this.list.update(cx, |l, cx| l.drop_external(e.paths(), &dest_ext, cx));
+            }))
     }
 }
 
