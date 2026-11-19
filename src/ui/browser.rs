@@ -395,6 +395,11 @@ impl Browser {
                 self.sync_watch(cx);
             }
             PaneEvent::SelectionChanged => self.selection_changed(id, cx),
+            PaneEvent::InspectorChanged => {
+                if self.focused == id {
+                    self.rebuild_menus(cx);
+                }
+            }
         }
     }
 
@@ -420,6 +425,7 @@ impl Browser {
             list.read(cx).focus_handle(cx).focus(window);
         }
         self.sync_chrome(window, cx);
+        self.rebuild_menus(cx);
         cx.notify();
     }
 
@@ -489,7 +495,11 @@ impl Browser {
             let o = self.ops.read(cx);
             (o.undo_title(), o.redo_title())
         };
-        menus::rebuild(cx, &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible });
+        let inspector_visible = self.panes.get(&self.focused).is_some_and(|p| p.read(cx).inspector_visible());
+        menus::rebuild(
+            cx,
+            &menus::MenuState { undo: u.as_deref(), redo: r.as_deref(), sidebar_visible: self.sidebar_visible, inspector_visible },
+        );
     }
 
     fn show_banner(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -1107,6 +1117,9 @@ impl Render for Browser {
             }))
             .on_action(cx.listener(|this, _: &GoToFolder, window, cx| this.toggle_goto(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+                this.focused_pane().clone().update(cx, |p, cx| p.toggle_inspector(cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenInNewTab, window, cx| this.open_selection(OpenMode::NewTab, window, cx)))
             .on_action(cx.listener(|this, _: &OpenInSplit, window, cx| this.open_selection(OpenMode::Split, window, cx)))
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal(cx)))

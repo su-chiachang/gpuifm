@@ -5,6 +5,7 @@ pub mod commands;
 pub mod dnd;
 pub mod palette;
 pub mod file_list;
+pub mod inspector;
 pub mod menus;
 pub mod opener;
 pub mod ops;

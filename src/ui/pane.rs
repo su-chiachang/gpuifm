@@ -10,6 +10,7 @@ use crate::ui::actions::FilterDown;
 use crate::ui::column_view::ColumnView;
 use crate::ui::dnd::{DragPreview, DraggedFiles, DraggedTab};
 use crate::ui::file_list::{FileList, FileListEvent};
+use crate::ui::inspector::Inspector;
 use crate::ui::opener::Opener;
 use crate::ui::ops::FileOps;
 use crate::ui::text_input::{TextInput, TextInputEvent};
@@ -38,6 +39,8 @@ pub enum PaneEvent {
     Changed,
     /// The active tab's selection changed.
     SelectionChanged,
+    /// The inspector was shown or hidden.
+    InspectorChanged,
 }
 
 struct FilterBox {
@@ -64,6 +67,9 @@ pub struct Pane {
     show_hidden: bool,
     filter: Option<FilterBox>,
     columns: Option<Entity<ColumnView>>,
+    /// Per pane and not persisted.
+    inspector: Entity<Inspector>,
+    inspector_visible: bool,
     focus_filter_pending: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -92,6 +98,7 @@ impl Pane {
     ) -> Self {
         let first = Self::make_tab(id.0, start, &ops, &opener, show_hidden, sort, view_mode == ViewMode::Column, cx);
         let busy = cx.observe(&ops, |_, _, cx| cx.notify());
+        let inspector = cx.new(|cx| Inspector::new(home.clone(), opener.clone(), cx));
         Self {
             id,
             tabs: Tabs::new(first),
@@ -103,6 +110,8 @@ impl Pane {
             show_hidden,
             filter: None,
             columns: None,
+            inspector,
+            inspector_visible: false,
             focus_filter_pending: false,
             focus: cx.focus_handle(),
             _subs: vec![busy],
@@ -129,6 +138,7 @@ impl Pane {
         let sub = cx.subscribe(&list, |this, l, ev: &FileListEvent, cx| match ev {
             FileListEvent::Navigated(p) => {
                 if l.entity_id() == this.active_list().entity_id() {
+                    this.push_inspector_selection(cx);
                     this.clear_filter(cx);
                     cx.emit(PaneEvent::ActiveDirChanged(p.clone()));
                 }
@@ -138,6 +148,7 @@ impl Pane {
             FileListEvent::SortRequested(key) => this.request_sort(*key, cx),
             FileListEvent::SelectionChanged => {
                 if l.entity_id() == this.active_list().entity_id() {
+                    this.push_inspector_selection(cx);
                     cx.emit(PaneEvent::SelectionChanged);
                 }
             }
@@ -236,6 +247,7 @@ impl Pane {
     pub fn clear_filter(&mut self, cx: &mut Context<Self>) {
         if self.filter.take().is_some() {
             self.apply_filter(cx);
+        self.push_inspector_selection(cx);
             cx.notify();
         }
     }
@@ -252,6 +264,44 @@ impl Pane {
             let list = self.active_list().clone();
             c.update(cx, |c, cx| c.set_list(list, cx));
         }
+    }
+
+    // ---- inspector ---------------------------------------------------------------------------
+
+    pub fn inspector_visible(&self) -> bool {
+        self.inspector_visible
+    }
+
+    pub fn inspector(&self) -> &Entity<Inspector> {
+        &self.inspector
+    }
+
+    pub fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        if self.active_renaming(cx) {
+            return;
+        }
+        self.inspector_visible = !self.inspector_visible;
+        self.sync_inspector(cx);
+        cx.emit(PaneEvent::InspectorChanged);
+        cx.notify();
+    }
+
+    /// While visible the inspector follows the active tab's selection.
+    fn push_inspector_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.inspector_visible {
+            return;
+        }
+        let sel = self.active_list().read(cx).selection_paths();
+        self.inspector.update(cx, |i, cx| i.set_selection(sel, cx));
+    }
+
+    /// Hands the inspector to the column view (column mode) and shows the current selection.
+    fn sync_inspector(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = &self.columns {
+            let ins = self.inspector_visible.then(|| self.inspector.clone());
+            c.update(cx, |c, cx| c.set_inspector(ins, cx));
+        }
+        self.push_inspector_selection(cx);
     }
 
     // ---- view mode ---------------------------------------------------------------------------
@@ -283,6 +333,7 @@ impl Pane {
         } else if self.columns.is_none() {
             let (list, sort, hidden, opener) = (self.active_list().clone(), self.sort, self.show_hidden, self.opener.clone());
             self.columns = Some(cx.new(|cx| ColumnView::new(list, sort, hidden, opener, cx)));
+            self.sync_inspector(cx);
         }
     }
 
@@ -415,6 +466,7 @@ impl Pane {
         let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -430,6 +482,7 @@ impl Pane {
             self.tabs.select(prev);
         }
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         if activate {
             cx.emit(PaneEvent::Refocus);
@@ -448,6 +501,7 @@ impl Pane {
         }
         self.tabs.close(ix);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -464,6 +518,7 @@ impl Pane {
         }
         self.tabs.select(ix);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -487,6 +542,7 @@ impl Pane {
         }
         self.tabs.cycle(delta);
         self.apply_filter(cx);
+        self.push_inspector_selection(cx);
         cx.emit(PaneEvent::Changed);
         cx.emit(PaneEvent::Refocus);
         cx.notify();
@@ -674,6 +730,19 @@ impl Render for Pane {
                         .child("Working\u{2026}"),
                 )
             })
+            .child(
+                div()
+                    .id("inspector-toggle")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(if self.inspector_visible { theme::ACCENT } else { theme::TEXT }))
+                    .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+                    .child("\u{24D8}")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx))),
+            )
             .child(self.button(
                 "hidden",
                 if hidden { "Hide Hidden" } else { "Show Hidden" },
@@ -701,6 +770,15 @@ impl Render for Pane {
             .child(toolbar)
             .child(match self.columns.clone() {
                 Some(c) => c.into_any_element(),
+                None if self.inspector_visible => div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(div().flex_1().min_w_0().h_full().child(list))
+                    .child(div().w(px(260.)).flex_none().h_full().border_l_1().border_color(rgb(theme::BORDER)).child(self.inspector.clone()))
+                    .into_any_element(),
                 None => list.into_any_element(),
             })
             .child(self.path_bar(cx))

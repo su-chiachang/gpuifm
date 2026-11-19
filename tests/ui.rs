@@ -2187,3 +2187,167 @@ fn drag_tab_refused_while_renaming(cx: &mut TestAppContext) {
     drag(cx, from, to, Modifiers::none());
     assert_eq!(tab_dirs(&b, 1, cx), [a, d1]);
 }
+
+// ---- Phase 6: Inspector --------------------------------------------------------------------
+
+const PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41,
+    0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00, 0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// Mounts with `home` as the (rooted) home and `start` as the first folder.
+fn mount_ins<'a>(
+    cx: &'a mut TestAppContext,
+    start: &Path,
+    home: &Path,
+    rec: &RevealRecorder,
+) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, op, home) = (start.to_path_buf(), rec.clone(), home.to_path_buf());
+    mount_opts(cx, move || BrowserOptions {
+        start: Some(start),
+        opener: Rc::new(op),
+        places: Places::rooted(home),
+        ..Default::default()
+    })
+}
+
+fn ins_visible(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext) -> bool {
+    cx.read(|cx| b.read(cx).pane(PaneId(pane)).unwrap().read(cx).inspector_visible())
+}
+
+fn ins<R>(b: &gpui::Entity<Browser>, pane: u64, cx: &mut VisualTestContext, f: impl FnOnce(&nanofm::ui::inspector::Inspector) -> R) -> R {
+    cx.read(|cx| {
+        let i = b.read(cx).pane(PaneId(pane)).unwrap().read(cx).inspector().clone();
+        f(i.read(cx))
+    })
+}
+
+fn row(rows: &[(String, String)], k: &str) -> Option<String> {
+    rows.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+}
+
+#[gpui::test]
+fn alt_cmd_i_toggles_inspector_per_pane(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-d");
+    assert_eq!(cx.read(|cx| b.read(cx).focused()), PaneId(2));
+    assert!(!ins_visible(&b, 1, cx) && !ins_visible(&b, 2, cx));
+    keys(cx, "alt-cmd-i");
+    assert!(ins_visible(&b, 2, cx));
+    assert!(!ins_visible(&b, 1, cx));
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 2, cx));
+}
+
+#[gpui::test]
+fn alt_cmd_i_in_rename_types_nothing(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "down enter");
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 1, cx));
+    assert_eq!(renaming(&b, cx), Some(("a.txt".into(), 0..1)));
+}
+
+#[gpui::test]
+fn inspector_no_selection_placeholder(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), Some("No Selection".into()));
+}
+
+#[gpui::test]
+fn inspector_multi_selection_count(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down shift-down");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), Some("2 Items Selected".into()));
+}
+
+#[gpui::test]
+fn inspector_file_details(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    let docs = t.path().join("docs");
+    fs::create_dir(&docs).unwrap();
+    fs::write(docs.join("hello.txt"), "12345").unwrap();
+    let (b, cx) = mount_ins(cx, &docs, t.path(), &RevealRecorder::default());
+    keys(cx, "alt-cmd-i down");
+    assert_eq!(ins(&b, 1, cx, |i| i.placeholder()), None);
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()), Some(("hello.txt".into(), "~/docs".into())));
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Size").as_deref(), Some("5 bytes"));
+    assert!(!row(&rows, "Kind").unwrap().is_empty());
+    assert_ne!(row(&rows, "Created").unwrap(), "--");
+    assert_ne!(row(&rows, "Modified").unwrap(), "--");
+    assert!(row(&rows, "Resolution").is_none());
+}
+
+#[gpui::test]
+fn inspector_folder_size_dashes(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("sub")).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Size").as_deref(), Some("--"));
+    assert!(!ins(&b, 1, cx, |i| i.shows_image()));
+}
+
+#[gpui::test]
+fn inspector_png_resolution(cx: &mut TestAppContext) {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("p.png"), PNG_1X1).unwrap();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    let rows = ins(&b, 1, cx, |i| i.rows());
+    assert_eq!(row(&rows, "Resolution").as_deref(), Some("1 \u{d7} 1"));
+    assert!(ins(&b, 1, cx, |i| i.shows_image()));
+}
+
+#[gpui::test]
+fn inspector_follows_selection(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "alt-cmd-i down");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "a.txt");
+    keys(cx, "down");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "b.txt");
+    // Opening it later shows the current selection at once.
+    keys(cx, "alt-cmd-i alt-cmd-i");
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "b.txt");
+}
+
+#[gpui::test]
+fn inspector_buttons_open_reveal_path(cx: &mut TestAppContext) {
+    let t = three_files();
+    let rec = RevealRecorder::default();
+    let (_b, cx) = mount_ins(cx, t.path(), t.path(), &rec);
+    keys(cx, "alt-cmd-i down");
+    let a = t.path().join("a.txt");
+    for id in ["inspector-open", "inspector-reveal", "inspector-path"] {
+        let c = bounds_of(cx, id).center();
+        cx.simulate_click(c, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert_eq!(rec.opened.borrow().as_slice(), std::slice::from_ref(&a));
+    assert_eq!(*rec.revealed.borrow(), [vec![a.clone()]]);
+    assert_eq!(clipboard_text(cx), Some(a.display().to_string()));
+}
+
+#[gpui::test]
+fn inspector_column_mode_trailing_column(cx: &mut TestAppContext) {
+    let t = three_files();
+    let (b, cx) = mount(cx, t.path());
+    keys(cx, "cmd-2 alt-cmd-i down");
+    assert!(cx.debug_bounds("inspector-col").is_some());
+    assert!(cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().unwrap().read(cx).has_inspector()));
+    assert_eq!(ins(&b, 1, cx, |i| i.heading()).unwrap().0, "a.txt");
+    keys(cx, "alt-cmd-i");
+    assert!(!ins_visible(&b, 1, cx));
+    let shown = cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().unwrap().read(cx).has_inspector());
+    assert!(!shown);
+}

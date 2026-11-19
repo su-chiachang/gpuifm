@@ -11,6 +11,7 @@ use crate::fm_core::history::parent_of;
 use crate::fm_core::listing::list_dir;
 use crate::fm_core::sort::{SortOrder, sort_entries};
 use crate::ui::file_list::{FileList, FileListEvent};
+use crate::ui::inspector::Inspector;
 use crate::ui::opener::Opener;
 use crate::ui::theme;
 use gpui::{
@@ -47,6 +48,7 @@ pub struct ColumnView {
     opener: Rc<dyn Opener>,
     scroll: ScrollHandle,
     shown_cols: usize,
+    inspector: Option<Entity<Inspector>>,
     next_gen: u64,
     /// Drilled into this folder before its preview had loaded: select its first entry once the
     /// list has loaded (cleared when that load completes, empty or not, or on navigating away).
@@ -57,7 +59,7 @@ pub struct ColumnView {
 impl ColumnView {
     pub fn new(list: Entity<FileList>, sort: SortOrder, hidden: bool, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
         let sub = Self::subscribe(&list, cx);
-        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, next_gen: 0, select_first_after_load: None, _sub: sub };
+        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, inspector: None, next_gen: 0, select_first_after_load: None, _sub: sub };
         s.sync_lefts(cx);
         s.update_preview(cx);
         s
@@ -99,6 +101,16 @@ impl ColumnView {
         self.sync_lefts(cx);
         self.update_preview(cx);
         cx.notify();
+    }
+
+    /// Shows (or hides) the inspector as the trailing column.
+    pub fn set_inspector(&mut self, i: Option<Entity<Inspector>>, cx: &mut Context<Self>) {
+        self.inspector = i;
+        cx.notify();
+    }
+
+    pub fn has_inspector(&self) -> bool {
+        self.inspector.is_some()
     }
 
     pub fn set_sort(&mut self, o: SortOrder, cx: &mut Context<Self>) {
@@ -333,7 +345,7 @@ impl ColumnView {
 
 impl Render for ColumnView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let n = self.lefts.len() + 1 + usize::from(self.preview.is_some());
+        let n = self.lefts.len() + 1 + usize::from(self.preview.is_some()) + usize::from(self.inspector.is_some());
         if n != self.shown_cols {
             self.shown_cols = n;
             self.scroll.scroll_to_item(n - 1);
@@ -354,6 +366,11 @@ impl Render for ColumnView {
         );
         if self.preview.is_some() {
             row = row.child(self.column(Kind::Preview, cx));
+        }
+        if let Some(i) = &self.inspector {
+            row = row.child(
+                div().id("inspector-col").debug_selector(|| "inspector-col".to_string()).w(px(260.)).h_full().flex_none().border_l_1().border_color(rgb(theme::BORDER)).child(i.clone()),
+            );
         }
         div().flex_1().min_h_0().w_full().child(row)
     }

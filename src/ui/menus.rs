@@ -7,6 +7,7 @@ pub struct MenuState<'a> {
     pub undo: Option<&'a str>,
     pub redo: Option<&'a str>,
     pub sidebar_visible: bool,
+    pub inspector_visible: bool,
 }
 
 /// (Re)installs the application menus; Undo/Redo titles follow the undo stack and the sidebar
@@ -24,6 +25,7 @@ pub fn rebuild(cx: &mut App, state: &MenuState) {
         "edit.undo" => MenuItem::action(undo.clone(), Undo),
         "edit.redo" => MenuItem::action(redo.clone(), Redo),
         "view.sidebar" => MenuItem::action(if state.sidebar_visible { "Hide Sidebar" } else { "Show Sidebar" }, ToggleSidebar),
+        "view.inspector" => MenuItem::action(if state.inspector_visible { "Hide Inspector" } else { "Show Inspector" }, ToggleInspector),
         _ => {
             let c = commands::find(id).expect("menu id in command table");
             MenuItem::Action { name: c.title.into(), action: (c.action)(), os_action: None }
@@ -49,7 +51,7 @@ pub fn rebuild(cx: &mut App, state: &MenuState) {
         ),
         menu(
             "View",
-            &["view.list", "view.column", "", "view.hidden", "view.sidebar", "", "view.splitRight", "view.splitDown"],
+            &["view.list", "view.column", "", "view.hidden", "view.sidebar", "view.inspector", "", "view.splitRight", "view.splitDown"],
         ),
         menu(
             "Window",

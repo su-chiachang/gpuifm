@@ -55,6 +55,7 @@ actions!(
         CopyPath,
         RevealInFinder,
         ToggleSidebar,
+        ToggleInspector,
         OpenInNewTab,
         OpenInSplit,
         CloseMenu,
