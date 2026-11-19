@@ -7,6 +7,7 @@
 
 use crate::fm_core::entry::FileEntry;
 use crate::ui::dnd::{DragPreview, DraggedFiles};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::fm_core::history::parent_of;
 use crate::fm_core::listing::list_dir;
 use crate::fm_core::sort::{SortOrder, sort_entries};
@@ -53,16 +54,24 @@ pub struct ColumnView {
     /// Drilled into this folder before its preview had loaded: select its first entry once the
     /// list has loaded (cleared when that load completes, empty or not, or on navigating away).
     select_first_after_load: Option<PathBuf>,
+    icons: Option<Entity<IconCache>>,
+    icons_sub: Option<Subscription>,
     _sub: Subscription,
 }
 
 impl ColumnView {
     pub fn new(list: Entity<FileList>, sort: SortOrder, hidden: bool, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
         let sub = Self::subscribe(&list, cx);
-        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, inspector: None, next_gen: 0, select_first_after_load: None, _sub: sub };
+        let mut s = Self { list, lefts: Vec::new(), preview: None, sort, hidden, opener, scroll: ScrollHandle::new(), shown_cols: 0, inspector: None, next_gen: 0, select_first_after_load: None, icons: None, icons_sub: None, _sub: sub };
         s.sync_lefts(cx);
         s.update_preview(cx);
         s
+    }
+
+    /// Shows native icons from `icons` in the cells (glyphs without it).
+    pub fn set_icons(&mut self, icons: Entity<IconCache>, cx: &mut Context<Self>) {
+        self.icons_sub = Some(cx.observe(&icons, |_, _, cx| cx.notify()));
+        self.icons = Some(icons);
     }
 
     fn subscribe(list: &Entity<FileList>, cx: &mut Context<Self>) -> Subscription {
@@ -289,6 +298,7 @@ impl ColumnView {
                         let is_sel = selected.as_deref() == Some(e.path.as_path());
                         let (is_dir, dest) = (e.is_dir, e.path.clone());
                         let drag = DraggedFiles::new(vec![e.path.clone()]);
+                        let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);
                         div()
                             .id(ix)
                             .debug_selector({
@@ -299,6 +309,7 @@ impl ColumnView {
                             .h(px(24.))
                             .flex()
                             .items_center()
+                            .gap_1()
                             .px_2()
                             .text_sm()
                             .overflow_hidden()
@@ -310,7 +321,8 @@ impl ColumnView {
                             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.click(kind, ix, ev, window, cx)))
                             .on_drag(drag, |dragged, _, _, cx| cx.new(|_| DragPreview::for_paths(&dragged.paths)))
                             .when(is_dir, |d| Self::drop_target(d, dest, cx, theme::DROP_BG))
-                            .child(if e.is_dir { format!("\u{25B8} {}", e.name) } else { format!("  {}", e.name) })
+                            .child(icon)
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
                     })
                     .collect()
             }),

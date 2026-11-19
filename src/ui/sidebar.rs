@@ -2,6 +2,7 @@ use crate::fm_core::dnd::DragSource;
 use crate::fm_core::places::{Place, list_volumes};
 use crate::fm_core::state::SidebarEntry;
 use crate::ui::dnd::{self, DragPreview, DraggedFiles, DraggedPlace};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::ui::ops::FileOps;
 use crate::ui::theme;
 use gpui::{
@@ -49,6 +50,8 @@ pub struct Sidebar {
     menu: Option<Menu>,
     ops: Entity<FileOps>,
     slot: Option<Slot>,
+    icons: Option<Entity<IconCache>>,
+    icons_sub: Option<gpui::Subscription>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -74,7 +77,15 @@ impl Sidebar {
             menu: None,
             ops,
             slot: None,
+            icons: None,
+            icons_sub: None,
         }
+    }
+
+    /// Shows native icons from `icons` next to the entries (none without it).
+    pub fn set_icons(&mut self, icons: Entity<IconCache>, cx: &mut Context<Self>) {
+        self.icons_sub = Some(cx.observe(&icons, |_, _, cx| cx.notify()));
+        self.icons = Some(icons);
     }
 
     pub fn set_active(&mut self, p: PathBuf, cx: &mut Context<Self>) {
@@ -106,6 +117,7 @@ impl Sidebar {
         let is_place = group.is_some();
         let slot = self.slot.filter(|s| Some(s.group) == group && cx.has_active_drag());
         let title_for_drag = title.clone();
+        let icon = icon_el(self.icons.as_ref(), path, true, false, 16., cx);
         div()
             .relative()
             .id((id, ix))
@@ -149,6 +161,10 @@ impl Sidebar {
             .when(slot.is_some_and(|s| s.at == ix + 1 && s.at == self.group_len(group)), |d| {
                 d.child(Self::insertion_line(false))
             })
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon)
             .child(title)
             .on_click(cx.listener(move |_, ev: &gpui::ClickEvent, _, cx| {
                 cx.emit(SidebarEvent::Open { path: click_path.clone(), new_tab: ev.modifiers().platform });

@@ -1,11 +1,12 @@
 //! The Inspector: a read-only panel describing the selection of a pane.
 
 use crate::fm_core::inspect::{self, Details};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::ui::opener::Opener;
 use crate::ui::theme;
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, Img, InteractiveElement, IntoElement, ObjectFit, ParentElement, Render,
-    RetainAllImageCache, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px, rgb,
+    RetainAllImageCache, StatefulInteractiveElement, Styled, StyledImage, Subscription, Window, div, img, px, rgb,
 };
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,12 +25,15 @@ pub struct Inspector {
     /// Own cache (not the app-wide asset cache) so decoded previews are dropped on selection change.
     cache: Entity<RetainAllImageCache>,
     clear_cache: bool,
+    icons: Entity<IconCache>,
+    _icons_sub: Subscription,
 }
 
 impl Inspector {
-    pub fn new(home: PathBuf, opener: Rc<dyn Opener>, cx: &mut Context<Self>) -> Self {
+    pub fn new(home: PathBuf, opener: Rc<dyn Opener>, icons: Entity<IconCache>, cx: &mut Context<Self>) -> Self {
+        let _icons_sub = cx.observe(&icons, |_, _, cx| cx.notify());
         let cache = RetainAllImageCache::new(cx);
-        Self { sel: Vec::new(), details: None, previewable: false, gen_: 0, home, opener, cache, clear_cache: false }
+        Self { sel: Vec::new(), details: None, previewable: false, gen_: 0, home, opener, cache, clear_cache: false, icons, _icons_sub }
     }
 
     /// Shows `sel`; does nothing when it is unchanged. Details load in the background.
@@ -106,8 +110,8 @@ impl Inspector {
 
     // ---- rendering -----------------------------------------------------------------------------
 
-    /// The large icon for the preview; step 7 plugs the native icon in here.
-    fn large_icon(is_dir: bool) -> AnyElement {
+    /// Glyph shown while an icon or image is not available.
+    fn glyph_icon(is_dir: bool) -> AnyElement {
         div()
             .size_full()
             .flex()
@@ -169,11 +173,12 @@ impl Render for Inspector {
             img(path.clone())
                 .image_cache(&self.cache)
                 .object_fit(ObjectFit::Contain)
-                .with_fallback(move || Self::large_icon(false))
+                .with_fallback(move || Self::glyph_icon(false))
                 .size_full()
                 .into_any_element()
         } else {
-            Self::large_icon(is_dir)
+            let package = is_dir && path.extension().is_some_and(|e| e == "app");
+            div().size_full().flex().items_center().justify_center().child(icon_el(Some(&self.icons), path, is_dir, package, 128., cx)).into_any_element()
         };
         let (open_p, reveal_p, copy_p) = (path.clone(), path.clone(), path.clone());
         let (o1, o2) = (self.opener.clone(), self.opener.clone());

@@ -2351,3 +2351,80 @@ fn inspector_column_mode_trailing_column(cx: &mut TestAppContext) {
     let shown = cx.read(|cx| b.read(cx).pane(PaneId(1)).unwrap().read(cx).columns().unwrap().read(cx).has_inspector());
     assert!(!shown);
 }
+
+// ---- icons ---------------------------------------------------------------------------------------
+
+use nanofm::fm_core::icons::IconKey;
+use nanofm::ui::icons::IconSource;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+struct FakeIcons(Arc<Mutex<Vec<PathBuf>>>, Option<Vec<u8>>);
+
+impl IconSource for FakeIcons {
+    fn icon_png(&self, path: &Path, _px: u32) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().push(path.to_path_buf());
+        self.1.clone()
+    }
+}
+
+fn mount_icons<'a>(cx: &'a mut TestAppContext, dir: &Path, fake: &FakeIcons) -> (gpui::Entity<Browser>, &'a mut VisualTestContext) {
+    let (start, f) = (dir.to_path_buf(), fake.clone());
+    mount_opts(cx, move || BrowserOptions { start: Some(start), icons: Rc::new(f), ..Default::default() })
+}
+
+fn icon_dir() -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    for f in ["a.txt", "b.txt", "c.md"] {
+        fs::write(t.path().join(f), "x").unwrap();
+    }
+    for d in ["sub1", "sub2"] {
+        fs::create_dir(t.path().join(d)).unwrap();
+    }
+    t
+}
+
+#[gpui::test]
+fn icons_fetched_once_per_kind(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), Some(PNG_1X1.to_vec()));
+    let (_b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    let calls = fake.0.lock().unwrap().clone();
+    let ext = |e: &str| calls.iter().filter(|p| p.extension().is_some_and(|x| x == e)).count();
+    assert_eq!((ext("txt"), ext("md")), (1, 1));
+    // Home, the root and volumes are their own kinds (per path); every other folder shares one.
+    let home = nanofm::fm_core::places::home_dir();
+    let shared = |p: &&PathBuf| p.is_dir() && **p != home && p.parent().is_some_and(|q| q != Path::new("/Volumes"));
+    assert_eq!(calls.iter().filter(shared).count(), 1, "{calls:?}");
+}
+
+#[gpui::test]
+fn missing_icon_not_retried(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), None);
+    let (b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    let n = fake.0.lock().unwrap().len();
+    assert!(n > 0);
+    assert!(cx.read(|cx| b.read(cx).icons().read(cx).is_missing(&IconKey::Ext("txt".into()), 16)));
+    keys(cx, "down down");
+    cx.run_until_parked();
+    assert_eq!(fake.0.lock().unwrap().len(), n);
+}
+
+#[gpui::test]
+fn icons_render_with_valid_png(cx: &mut TestAppContext) {
+    let t = icon_dir();
+    let fake = FakeIcons(Arc::default(), Some(PNG_1X1.to_vec()));
+    let (b, cx) = mount_icons(cx, t.path(), &fake);
+    cx.run_until_parked();
+    keys(cx, "alt-cmd-i down");
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let c = b.read(cx).icons().read(cx);
+        assert!(c.is_ready(&IconKey::Ext("txt".into()), 16));
+        assert!(c.is_ready(&IconKey::Folder, 16));
+        assert!(c.is_ready(&IconKey::Folder, 128)); // the inspector's large icon (first row is a folder)
+    });
+}

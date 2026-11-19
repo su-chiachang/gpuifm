@@ -9,6 +9,7 @@ use crate::fm_core::sort::{SortKey, SortOrder, sort_entries};
 use crate::fm_core::dnd::DragSource;
 use crate::ui::actions::*;
 use crate::ui::dnd::{self, DragPreview, DraggedFiles};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::ui::ops::{FileOps, FileOpsEvent};
 use crate::ui::opener::Opener;
 use crate::ui::text_input::{TextInput, TextInputEvent};
@@ -78,6 +79,7 @@ pub struct FileList {
     focus_rename: bool,
     rename_request: bool,
     reload_after_rename: bool,
+    icons: Option<Entity<IconCache>>,
     _subs: Vec<Subscription>,
 }
 
@@ -110,6 +112,12 @@ fn leaf_of(p: &Path) -> String {
 }
 
 impl FileList {
+    /// Shows native icons from `icons` in the rows (glyphs without it).
+    pub fn set_icons(&mut self, icons: Entity<IconCache>, cx: &mut Context<Self>) {
+        self._subs.push(cx.observe(&icons, |_, _, cx| cx.notify()));
+        self.icons = Some(icons);
+    }
+
     pub fn new(
         start: PathBuf,
         ops: Entity<FileOps>,
@@ -154,6 +162,7 @@ impl FileList {
             focus_rename: false,
             rename_request: false,
             reload_after_rename: false,
+            icons: None,
             _subs: vec![sub],
         };
         s.reload(cx);
@@ -842,11 +851,7 @@ impl Render for FileList {
                             let drag = if is_sel { sel_drag.clone() } else { DraggedFiles::new(vec![path.clone()]) };
                             let (weak2, ops2) = (weak.clone(), ops.clone());
                             let (weak, drag_path, dest) = (weak.clone(), path.clone(), path.clone());
-                            let name = if e.is_dir {
-                                format!("\u{25B8} {}", e.name)
-                            } else {
-                                format!("  {}", e.name)
-                            };
+                            let icon = icon_el(this.icons.as_ref(), &e.path, e.is_dir, e.is_package, 16., cx);
                             let dim = rgb(if is_sel { theme::TEXT } else { theme::TEXT_DIM });
                             let name_cell = match renaming {
                                 Some(input) => div().flex_1().min_w_0().px_1().child(input),
@@ -854,10 +859,19 @@ impl Render for FileList {
                                     .flex_1()
                                     .min_w_0()
                                     .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(name),
+                                    .child(icon)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(e.name.clone()),
+                                    ),
                             };
                             div()
                                 .id(ix)

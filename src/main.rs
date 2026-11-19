@@ -44,6 +44,7 @@ fn main() {
                     opener: Rc::new(SystemOpener::default()),
                     watch: true,
                     places: nanofm::fm_core::places::Places::system(),
+                    icons: Rc::new(nanofm::ui::icons::SystemIcons),
                 };
                 cx.new(|cx| Browser::with_options(opts, window, cx))
             },

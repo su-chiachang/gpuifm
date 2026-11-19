@@ -10,6 +10,7 @@ use crate::ui::actions::FilterDown;
 use crate::ui::column_view::ColumnView;
 use crate::ui::dnd::{DragPreview, DraggedFiles, DraggedTab};
 use crate::ui::file_list::{FileList, FileListEvent};
+use crate::ui::icons::{IconCache, icon_el};
 use crate::ui::inspector::Inspector;
 use crate::ui::opener::Opener;
 use crate::ui::ops::FileOps;
@@ -70,6 +71,7 @@ pub struct Pane {
     /// Per pane and not persisted.
     inspector: Entity<Inspector>,
     inspector_visible: bool,
+    icons: Entity<IconCache>,
     focus_filter_pending: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -94,11 +96,13 @@ impl Pane {
         show_hidden: bool,
         sort: SortOrder,
         view_mode: ViewMode,
+        icons: Entity<IconCache>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = Self::make_tab(id.0, start, &ops, &opener, show_hidden, sort, view_mode == ViewMode::Column, cx);
+        let first = Self::make_tab(id.0, start, &ops, &opener, &icons, show_hidden, sort, view_mode == ViewMode::Column, cx);
         let busy = cx.observe(&ops, |_, _, cx| cx.notify());
-        let inspector = cx.new(|cx| Inspector::new(home.clone(), opener.clone(), cx));
+        let icons_sub = cx.observe(&icons, |_, _, cx| cx.notify());
+        let inspector = cx.new(|cx| Inspector::new(home.clone(), opener.clone(), icons.clone(), cx));
         Self {
             id,
             tabs: Tabs::new(first),
@@ -112,9 +116,10 @@ impl Pane {
             columns: None,
             inspector,
             inspector_visible: false,
+            icons,
             focus_filter_pending: false,
             focus: cx.focus_handle(),
-            _subs: vec![busy],
+            _subs: vec![busy, icons_sub],
         }
     }
 
@@ -124,6 +129,7 @@ impl Pane {
         start: PathBuf,
         ops: &Entity<FileOps>,
         opener: &Rc<dyn Opener>,
+        icons: &Entity<IconCache>,
         show_hidden: bool,
         sort: SortOrder,
         compact: bool,
@@ -133,6 +139,7 @@ impl Pane {
             let mut l = FileList::new(start, ops.clone(), opener.clone(), show_hidden, sort, cx);
             l.set_compact_initial(compact);
             l.set_pane_tag(pane);
+            l.set_icons(icons.clone(), cx);
             l
         });
         let sub = cx.subscribe(&list, |this, l, ev: &FileListEvent, cx| match ev {
@@ -163,7 +170,7 @@ impl Pane {
     pub fn restore_tabs(&mut self, snap: &PaneSnapshot, cx: &mut Context<Self>) {
         for dir in snap.tabs.iter().skip(1) {
             let compact = self.view_mode == ViewMode::Column;
-            let tab = Self::make_tab(self.id.0, dir.clone(), &self.ops, &self.opener, self.show_hidden, self.sort, compact, cx);
+            let tab = Self::make_tab(self.id.0, dir.clone(), &self.ops, &self.opener, &self.icons, self.show_hidden, self.sort, compact, cx);
             self.tabs.add_after_active(tab);
         }
         self.tabs.select(snap.active);
@@ -332,7 +339,12 @@ impl Pane {
             self.columns = None;
         } else if self.columns.is_none() {
             let (list, sort, hidden, opener) = (self.active_list().clone(), self.sort, self.show_hidden, self.opener.clone());
-            self.columns = Some(cx.new(|cx| ColumnView::new(list, sort, hidden, opener, cx)));
+            let icons = self.icons.clone();
+            self.columns = Some(cx.new(|cx| {
+                let mut c = ColumnView::new(list, sort, hidden, opener, cx);
+                c.set_icons(icons, cx);
+                c
+            }));
             self.sync_inspector(cx);
         }
     }
@@ -384,6 +396,7 @@ impl Pane {
                 crumbs_row = crumbs_row.child(div().flex_none().text_color(rgb(theme::TEXT_DIM)).child("\u{203A}"));
             }
             let title = crumb_title(&p, &self.home);
+            let crumb_icon = icon_el(Some(&self.icons), &p, true, false, 16., cx);
             crumbs_row = crumbs_row.child(
                 div()
                     .id(("crumb", i))
@@ -394,6 +407,10 @@ impl Pane {
                     .cursor_pointer()
                     .text_color(rgb(if i == last { theme::TEXT } else { theme::TEXT_DIM }))
                     .hover(|d| d.bg(rgb(theme::HOVER_BG)))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(crumb_icon)
                     .child(title)
                     .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
                     .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::DROP_BG)))
@@ -463,7 +480,7 @@ impl Pane {
             let l = self.active_list().read(cx);
             (l.current_dir().to_path_buf(), l.show_hidden())
         };
-        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, &self.icons, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         self.apply_filter(cx);
         self.push_inspector_selection(cx);
@@ -476,7 +493,7 @@ impl Pane {
     /// active tab stays where it is. Adding several background tabs in reverse keeps their order.
     pub fn add_tab(&mut self, dir: PathBuf, activate: bool, cx: &mut Context<Self>) {
         let (hidden, prev) = (self.show_hidden, self.tabs.active());
-        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
+        let tab = Self::make_tab(self.id.0, dir, &self.ops, &self.opener, &self.icons, hidden, self.sort, self.view_mode == ViewMode::Column, cx);
         self.tabs.add_after_active(tab);
         if !activate {
             self.tabs.select(prev);
@@ -599,6 +616,8 @@ impl Pane {
         for (ix, t) in self.tabs.items().iter().enumerate() {
             let is_active = ix == active;
             let title = t.list.read(cx).title();
+            let tab_dir = t.list.read(cx).current_dir().to_path_buf();
+            let tab_icon = icon_el(Some(&self.icons), &tab_dir, true, false, 16., cx);
             let drag_title = title.clone();
             let weak = cx.entity().downgrade();
             strip = strip.child(
@@ -625,11 +644,13 @@ impl Pane {
                             .py_0p5()
                             .min_w_0()
                             .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .cursor_pointer()
                             .hover(|d| d.bg(rgb(theme::HOVER_BG)))
-                            .child(title)
+                            .child(tab_icon)
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
                             .on_drag(DraggedTab { pane: self.id, ix }, move |_, _, _, cx| {
                                 cx.new(|_| DragPreview::new(drag_title.clone()))
                             })

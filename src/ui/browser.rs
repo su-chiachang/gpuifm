@@ -22,6 +22,7 @@ use gpui::{
 };
 use futures::StreamExt;
 use std::collections::{BTreeSet, HashMap};
+use crate::ui::icons::{IconCache, IconSource, NoIcons};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,6 +47,8 @@ pub struct BrowserOptions {
     pub watch: bool,
     /// Home and the Go menu's folders; tests root them in a tempdir.
     pub places: Places,
+    /// Where file icons come from (tests: none, or a fake).
+    pub icons: Rc<dyn IconSource>,
 }
 
 impl Default for BrowserOptions {
@@ -57,6 +60,7 @@ impl Default for BrowserOptions {
             opener: Rc::new(SystemOpener::default()),
             watch: false,
             places: Places::system(),
+            icons: Rc::new(NoIcons),
         }
     }
 }
@@ -83,6 +87,7 @@ impl Render for DragGhost {
 pub struct Browser {
     sidebar: Entity<Sidebar>,
     ops: Entity<FileOps>,
+    icons: Entity<IconCache>,
     panes: HashMap<PaneId, Entity<Pane>>,
     pane_subs: HashMap<PaneId, Vec<Subscription>>,
     layout: LayoutTree<PaneId>,
@@ -127,7 +132,8 @@ impl Browser {
     }
 
     pub fn with_options(opts: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let BrowserOptions { start, store, index_roots, opener, watch, places } = opts;
+        let BrowserOptions { start, store, index_roots, opener, watch, places, icons } = opts;
+        let icons = cx.new(|_| IconCache::new(icons));
         let loaded = store.as_ref().map(|s| s.load_with_home(&places.home));
         let (favorites, pinned, show_hidden, sidebar_visible) = match &loaded {
             Some(l) => (l.favorites.clone(), l.pinned.clone(), l.show_hidden, l.sidebar_visible),
@@ -154,7 +160,11 @@ impl Browser {
         };
 
         let ops = cx.new(|_| FileOps::new());
-        let sidebar = cx.new(|_| Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone(), ops.clone()));
+        let sidebar = cx.new(|cx| {
+            let mut s = Sidebar::new(first_dir, places.home.clone(), favorites.clone(), pinned.clone(), ops.clone());
+            s.set_icons(icons.clone(), cx);
+            s
+        });
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(
             &sidebar,
@@ -210,6 +220,7 @@ impl Browser {
         let mut this = Self {
             sidebar,
             ops,
+            icons,
             panes: HashMap::new(),
             pane_subs: HashMap::new(),
             layout,
@@ -285,6 +296,11 @@ impl Browser {
         self.watcher.as_ref().map(|w| w.watched().clone()).unwrap_or_default()
     }
 
+    /// The shared icon cache.
+    pub fn icons(&self) -> &Entity<IconCache> {
+        &self.icons
+    }
+
     pub fn active_list(&self, cx: &App) -> Entity<FileList> {
         self.focused_pane().read(cx).active_list().clone()
     }
@@ -338,10 +354,11 @@ impl Browser {
     // ---- pane management ---------------------------------------------------------------------
 
     fn create_pane(&mut self, id: PaneId, snap: PaneSnapshot, sort: SortOrder, window: &mut Window, cx: &mut Context<Self>) {
-        let (ops, opener, hidden, home) = (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone());
+        let (ops, opener, hidden, home, icons) =
+            (self.ops.clone(), self.opener.clone(), self.show_hidden, self.places.home.clone(), self.icons.clone());
         let first = snap.tabs.first().cloned().unwrap_or_else(|| self.places.home.clone());
         let pane = cx.new(|cx| {
-            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, cx);
+            let mut p = Pane::new(id, first, ops, opener, home, hidden, sort, snap.view_mode, icons, cx);
             p.restore_tabs(&snap, cx);
             p
         });
